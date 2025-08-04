@@ -1,41 +1,23 @@
-from torch.utils.tensorboard import SummaryWriter
-import time
-import logging
-from config import get_config, Config
+import os
 import logging
 import time
-import os
-from utils.dataloader import get_loaders
-from utils.visualizer import create_visualization
-from utils.train_utils import forward_pass
-from utils.calc_post_probs import calculate_posterior_probs
-from utils.loss import GmmSegLoss
-from models.unet import UNet
-from models.regnet import RR_ResNet
-from data.dataset import ACDCDataset
-
-
-import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
-from data.dataset import ACDCDataset
-from data.transform import get_image_transform, get_label_transform
-from utils.metrics import dice_coefficient, iou_score, pixel_error
-from utils.calc_post_probs import calculate_posterior_probs
 from utils.loss import GmmSegLoss
-from utils.affine_transform import apply_affine_transform
+from utils.train_utils import forward_pass
+from utils.visualizer import create_visualization
+from utils.calc_post_probs import calculate_posterior_probs
+from utils.metrics import dice_coefficient, iou_score, pixel_error
+from utils.dataloader import get_loaders, get_dirichlet_priors
 from models.unet import UNet
 from models.regnet import RR_ResNet
 from config import Config, get_config
 from tqdm import tqdm
-from PIL import Image
-import numpy as np
-import torchvision.transforms as transforms
 import matplotlib
 import matplotlib.pyplot as plt
 matplotlib.use('Agg')
+from torch.utils.tensorboard import SummaryWriter
 
 
 class Trainer:
@@ -48,13 +30,7 @@ class Trainer:
         self.train_loader, self.test_loader = get_loaders(self.config)
 
         # 加载Dirichlet先验分布
-        priors_path = [entry.path for entry in os.scandir(os.path.join(config.DATASET_DIR, "dirichlet_priors")) if entry.is_file()]
-        priors_path.sort()
-        self.dirichlet_priors = []
-        for prior_path in priors_path:
-            dirichlet_prior = torch.load(
-                prior_path, map_location=config.DEVICE, weights_only=True)
-            self.dirichlet_priors.append(dirichlet_prior)
+        self.dirichlet_priors = get_dirichlet_priors(self.config)
 
         # 定义模型
         self.unet = UNet(config.IN_CHANNELS, config.FEATURE_NUM).to(config.DEVICE)  # UNet 用于提取特征
@@ -67,12 +43,12 @@ class Trainer:
         x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", map_location=config.DEVICE, weights_only=True)
         z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", map_location=config.DEVICE, weights_only=True)
         o_net_weights = torch.load("checkpoints/PRIOR/o_train_4.pth", map_location=config.DEVICE, weights_only=True)
+        reg_net_weights = torch.load("checkpoints/reg_prior.pth", map_location=config.DEVICE, weights_only=True)
+        unet_weights = torch.load("checkpoints/unet/best.pth", map_location=config.DEVICE, weights_only=True)
+        # 加载权重到模型
         self.x_net.load_state_dict(x_net_weights)
         self.z_net.load_state_dict(z_net_weights)
         self.o_net.load_state_dict(o_net_weights)
-
-        reg_net_weights = torch.load("checkpoints/reg_prior.pth", map_location=config.DEVICE, weights_only=True)
-        unet_weights = torch.load("checkpoints/unet/best.pth", map_location=config.DEVICE, weights_only=True)
         self.reg_net.load_state_dict(reg_net_weights)
         self.unet.load_state_dict(unet_weights)
         self.reg_net.eval()
@@ -83,7 +59,7 @@ class Trainer:
         self.optimizer = optim.Adam([
             {'params': self.x_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5},
             {'params': self.z_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5},
-            {'params': self.o_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5},
+            {'params': self.o_net.parameters(), 'lr': config.LEARNING_RATE*0.1, 'weight_decay': 1e-5},
         ])
 
         # 定义学习率调度器
@@ -94,6 +70,11 @@ class Trainer:
         log_dir = os.path.join(self.config.LOGS_DIR, "tensorboard", time_str)
         os.makedirs(log_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir)
+
+        # 创建输出目录
+        self.output_dir = os.path.join(self.config.OUTPUT_DIR, time_str)
+        os.makedirs(self.output_dir, exist_ok=True)
+
 
     def train_one_epoch(self, epoch, epsilon=1e-6):
         self.x_net.train()
@@ -197,9 +178,9 @@ class Trainer:
                 label_np = torch.squeeze(label, dim=1).cpu().numpy()
 
                 dataset_name = os.path.basename(self.config.DATASET)
-                dice_total += dice_coefficient(pred_cls, label_np, config.GMM_NUM, dataset_name, background=False)
-                iou_total += iou_score(pred_cls, label_np, config.GMM_NUM, dataset_name, background=False)
-                pixel_err_total += pixel_error(pred_cls, label_np, config.GMM_NUM, dataset_name, background=False)
+                dice_total += dice_coefficient(pred_cls, label_np, config.GMM_NUM, dataset_name, background=True)
+                iou_total += iou_score(pred_cls, label_np, config.GMM_NUM, dataset_name, background=True)
+                pixel_err_total += pixel_error(pred_cls, label_np, config.GMM_NUM, dataset_name, background=True)
 
         self.test_loss1 = test_loss1 / len(self.test_loader)
         self.test_loss2 = test_loss2 / len(self.test_loader)
@@ -262,9 +243,6 @@ class Trainer:
 
 
     def visualize(self, epoch):
-        time_str = time.strftime("%Y%m%d-%H%M%S")
-        output_dir = os.path.join(self.config.OUTPUT_DIR, time_str)
-        os.makedirs(output_dir, exist_ok=True)
         create_visualization(image_show=self.image_show,
                              feature_show=self.feature_show,
                              mu_show=self.mu_show,
@@ -275,7 +253,7 @@ class Trainer:
                              label_show=self.label_show,
                              pred_show=self.pred_show,
                              slice_id=self.slice_id,
-                             output_dir=output_dir,
+                             output_dir=self.output_dir,
                              epoch=epoch, 
                              logger=self.logger)
 

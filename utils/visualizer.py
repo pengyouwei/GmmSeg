@@ -14,13 +14,8 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
     
     # 打印统计信息
     if logger:
-        logger.info(f"Image range: [{image_show.min():.3f}, {image_show.max():.3f}]")
-        logger.info(f"Feature range: [{feature_show.min():.3f}, {feature_show.max():.3f}]")
-        logger.info(f"Feature mean: {feature_show.mean():.3f}, std: {feature_show.std():.3f}")
-        logger.info(f"Feature median: {np.median(feature_show):.3f}")
-        logger.info(f"Mu range: [{mu_show.min():.3f}, {mu_show.max():.3f}]")
-        logger.info(f"Var range: [{var_show.min():.3f}, {var_show.max():.3f}]")
-        logger.info(f"Pi range: [{pi_show.min():.3f}, {pi_show.max():.3f}]")
+        # 打印mu, var, pi的统计信息
+        pass
     
     # 第一个可视化图形 - mu, var, pi
     fig = plt.figure(figsize=(15, 8))
@@ -82,7 +77,7 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
     cbar_pi.set_label('π value', rotation=270, labelpad=15)
     
     if epoch % 5 == 0:
-        plt.savefig(f"{output_dir}/mu_var_pi_{epoch+1}.png", dpi=150, bbox_inches='tight')
+        plt.savefig(f"{output_dir}/mu_var_pi_{epoch}.png", dpi=150, bbox_inches='tight')
     plt.close()
 
     # 第二个可视化图形 - d0/d1 对比
@@ -121,5 +116,5 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
         ax.axis('off')
 
     if epoch % 5 == 0:
-        plt.savefig(f"{output_dir}/output_{epoch+1}.png", dpi=150, bbox_inches='tight')
+        plt.savefig(f"{output_dir}/output_{epoch}.png", dpi=150, bbox_inches='tight')
     plt.close()

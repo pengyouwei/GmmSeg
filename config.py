@@ -7,7 +7,7 @@ class Config:
     DATASET: str = "ACDC"
     DATASET_DIR: str = "D:/Users/pyw/Desktop/Dataset"
     BATCH_SIZE: int = 16
-    EPOCHS: int = 100
+    EPOCHS: int = 200
     LEARNING_RATE: float = 1e-4
     NUM_WORKERS: int = 8
     BEST_LOSS: float = float('inf')

@@ -44,3 +44,22 @@ def get_loaders(config: Config):
                              drop_last=True)
 
     return train_loader, test_loader
+
+
+
+def get_dirichlet_priors(config: Config):
+    """
+    Load and return the precomputed Dirichlet priors.
+    """
+    priors_path = [entry.path for entry in os.scandir(os.path.join(config.DATASET_DIR, "dirichlet_priors")) if entry.is_file()]
+    if not priors_path:
+        raise FileNotFoundError("No Dirichlet priors found in the specified directory.")
+    priors_path.sort()
+    dirichlet_priors = []
+    for prior_path in priors_path:
+        dirichlet_prior = torch.load(prior_path, map_location=config.DEVICE, weights_only=True)
+        dirichlet_priors.append(dirichlet_prior)
+    dirichlet_priors = torch.stack(dirichlet_priors, dim=0)  # [10, 4, H, W]
+    dirichlet_priors = dirichlet_priors.to(config.DEVICE)
+    return dirichlet_priors
+    
