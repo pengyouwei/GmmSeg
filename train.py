@@ -40,14 +40,14 @@ class Trainer:
         self.reg_net = RR_ResNet(input_channels=config.GMM_NUM).to(config.DEVICE)
 
         # 加载预训练权重
-        x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", map_location=config.DEVICE, weights_only=True)
-        z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", map_location=config.DEVICE, weights_only=True)
+        # x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", map_location=config.DEVICE, weights_only=True)
+        # z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", map_location=config.DEVICE, weights_only=True)
         o_net_weights = torch.load("checkpoints/PRIOR/o_train_4.pth", map_location=config.DEVICE, weights_only=True)
         reg_net_weights = torch.load("checkpoints/reg_prior.pth", map_location=config.DEVICE, weights_only=True)
         unet_weights = torch.load("checkpoints/unet/best.pth", map_location=config.DEVICE, weights_only=True)
         # 加载权重到模型
-        self.x_net.load_state_dict(x_net_weights)
-        self.z_net.load_state_dict(z_net_weights)
+        # self.x_net.load_state_dict(x_net_weights)
+        # self.z_net.load_state_dict(z_net_weights)
         self.o_net.load_state_dict(o_net_weights)
         self.reg_net.load_state_dict(reg_net_weights)
         self.unet.load_state_dict(unet_weights)
@@ -191,7 +191,6 @@ class Trainer:
         self.avg_iou = iou_total / len(self.test_loader)
         self.avg_pixel_err = pixel_err_total / len(self.test_loader)
 
-            
         # 可视化最后一个batch的结果
         i = config.BATCH_SIZE - 1
         self.mu_show = mu.cpu().detach().numpy()[i]
@@ -204,6 +203,7 @@ class Trainer:
         self.label_show = label_np[i]
         self.pred_show = pred_cls[i]
         self.slice_id = slice_info[i].item() 
+
 
     def print_log_info(self, epoch):
         if self.logger:
