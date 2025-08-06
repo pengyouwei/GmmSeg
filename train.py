@@ -34,17 +34,27 @@ class Trainer:
 
         # 定义模型
         self.unet = UNet(config.IN_CHANNELS, config.FEATURE_NUM).to(config.DEVICE)  # UNet 用于提取特征
-        self.x_net = UNet(config.FEATURE_NUM, config.FEATURE_NUM *config.GMM_NUM*2).to(config.DEVICE)  # mu, var
+        self.x_net = UNet(config.FEATURE_NUM, config.FEATURE_NUM*config.GMM_NUM*2).to(config.DEVICE)  # mu, var
         self.z_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(config.DEVICE)  # pi
         self.o_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(config.DEVICE)  # d
         self.reg_net = RR_ResNet(input_channels=config.GMM_NUM).to(config.DEVICE)
 
         # 加载预训练权重
-        # x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", map_location=config.DEVICE, weights_only=True)
-        # z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", map_location=config.DEVICE, weights_only=True)
-        o_net_weights = torch.load("checkpoints/PRIOR/o_train_4.pth", map_location=config.DEVICE, weights_only=True)
-        reg_net_weights = torch.load("checkpoints/reg_prior.pth", map_location=config.DEVICE, weights_only=True)
-        unet_weights = torch.load("checkpoints/unet/best.pth", map_location=config.DEVICE, weights_only=True)
+        x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", 
+                                   map_location=config.DEVICE, 
+                                   weights_only=True)
+        z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", 
+                                   map_location=config.DEVICE, 
+                                   weights_only=True)
+        o_net_weights = torch.load("checkpoints/PRIOR/o_train_4.pth", 
+                                   map_location=config.DEVICE, 
+                                   weights_only=True)
+        reg_net_weights = torch.load("checkpoints/reg_prior.pth", 
+                                     map_location=config.DEVICE, 
+                                     weights_only=True)
+        unet_weights = torch.load("checkpoints/unet/best.pth", 
+                                  map_location=config.DEVICE, 
+                                  weights_only=True)
         # 加载权重到模型
         # self.x_net.load_state_dict(x_net_weights)
         # self.z_net.load_state_dict(z_net_weights)
@@ -63,7 +73,10 @@ class Trainer:
         ])
 
         # 定义学习率调度器
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=5)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 
+                                                              mode='min', 
+                                                              factor=0.5, 
+                                                              patience=5)
 
         # 创建日志记录器
         time_str = time.strftime("%Y%m%d-%H%M%S")
@@ -97,15 +110,28 @@ class Trainer:
             self.optimizer.zero_grad()
 
             # 前向传播
-            image_4_features, mu, var, pi, d1, d0 = forward_pass(
-                image, self.unet, self.x_net, self.z_net, self.o_net, self.reg_net,
-                self.dirichlet_priors, slice_info, num_of_slice_info, self.config, epoch, epsilon
-            )
+            image_4_features, mu, var, pi, d1, d0 = forward_pass(image=image, 
+                                                                 unet=self.unet, 
+                                                                 x_net=self.x_net, 
+                                                                 z_net=self.z_net, 
+                                                                 o_net=self.o_net, 
+                                                                 reg_net=self.reg_net,
+                                                                 dirichlet_priors=self.dirichlet_priors, 
+                                                                 slice_info=slice_info, 
+                                                                 num_of_slice_info=num_of_slice_info, 
+                                                                 config=self.config, 
+                                                                 epoch=epoch, 
+                                                                 epsilon=epsilon)
 
             # 计算损失
-            loss, loss_1, loss_2, loss_3, loss_mse = self.criterion(
-                image_4_features, mu, var, pi, d=d1, d0=d0, epoch=epoch, total_epochs=self.config.EPOCHS
-            )
+            loss, loss_1, loss_2, loss_3, loss_mse = self.criterion(image_4_features=image_4_features, 
+                                                                    mu=mu, 
+                                                                    var=var, 
+                                                                    pi=pi, 
+                                                                    d=d1, 
+                                                                    d0=d0, 
+                                                                    epoch=epoch, 
+                                                                    total_epochs=self.config.EPOCHS)
 
             # 累加损失
             train_loss1 += loss_1.item()
@@ -155,15 +181,28 @@ class Trainer:
                 num_of_slice_info = batch["image"]["slice_num"]
 
                 # 前向传播
-                image_4_features, mu, var, pi, d1, d0 = forward_pass(
-                    image, self.unet, self.x_net, self.z_net, self.o_net, self.reg_net,
-                    self.dirichlet_priors, slice_info, num_of_slice_info, self.config, epoch, epsilon=epsilon
-                )
+                image_4_features, mu, var, pi, d1, d0 = forward_pass(image=image, 
+                                                                     unet=self.unet, 
+                                                                     x_net=self.x_net, 
+                                                                     z_net=self.z_net, 
+                                                                     o_net=self.o_net, 
+                                                                     reg_net=self.reg_net,
+                                                                     dirichlet_priors=self.dirichlet_priors, 
+                                                                     slice_info=slice_info, 
+                                                                     num_of_slice_info=num_of_slice_info, 
+                                                                     config=self.config, 
+                                                                     epoch=epoch, 
+                                                                     epsilon=epsilon)
 
                 # 计算损失
-                loss, loss_1, loss_2, loss_3, loss_mse = self.criterion(
-                    image_4_features, mu, var, pi, d=d1, d0=d0, epoch=epoch, total_epochs=self.config.EPOCHS
-                )
+                loss, loss_1, loss_2, loss_3, loss_mse = self.criterion(image_4_features=image_4_features, 
+                                                                        mu=mu, 
+                                                                        var=var, 
+                                                                        pi=pi, 
+                                                                        d=d1, 
+                                                                        d0=d0, 
+                                                                        epoch=epoch, 
+                                                                        total_epochs=self.config.EPOCHS)
 
                 # 累加损失
                 test_loss1 += loss_1.item()
@@ -320,7 +359,7 @@ if __name__ == "__main__":
 
     logger.info("Starting training...")
 
-    
+    # 创建训练器并运行
     logger.info(f"Using configuration: {config}")
     trainer = Trainer(config, logger)
     trainer.run()
