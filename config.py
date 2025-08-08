@@ -24,7 +24,7 @@ class Config:
     CLASS_NUM: int = 4
     GMM_NUM: int = 4
     SCALE_RANGE: tuple = (0.2, 5.0)
-    SHIFT_RANGE: tuple = (-20, 20)
+    SHIFT_RANGE: tuple = (-10, 10)
 
 
 

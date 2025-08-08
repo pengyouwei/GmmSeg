@@ -50,6 +50,7 @@ def get_loaders(config: Config):
 def get_dirichlet_priors(config: Config):
     """
     Load and return the precomputed Dirichlet priors.
+    注意：将概率值转换为狄利克雷浓度参数
     """
     priors_path = [entry.path for entry in os.scandir(os.path.join(config.DATASET_DIR, "dirichlet_priors")) if entry.is_file()]
     if not priors_path:
@@ -59,7 +60,25 @@ def get_dirichlet_priors(config: Config):
     for prior_path in priors_path:
         dirichlet_prior = torch.load(prior_path, map_location=config.DEVICE, weights_only=True)
         dirichlet_priors.append(dirichlet_prior)
+    
     dirichlet_priors = torch.stack(dirichlet_priors, dim=0)  # [10, 4, H, W]
+    
+    # 重要修正：将概率值(0-1)转换为狄利克雷浓度参数
+    print(f"原始先验范围: [{dirichlet_priors.min().item():.4f}, {dirichlet_priors.max().item():.4f}]")
+    
+    # 方法1: 基于概率值计算浓度参数
+    # 对于每个像素位置，根据概率值计算合适的浓度参数
+    base_concentration = 2.0    # 基础浓度
+    max_concentration = 8.0     # 最大浓度
+    
+    # 将概率值转换为浓度参数：高概率 -> 高浓度
+    dirichlet_priors = base_concentration + dirichlet_priors * (max_concentration - base_concentration)
+    
+    # 确保参数在合理范围内
+    dirichlet_priors = torch.clamp(dirichlet_priors, min=0.5, max=10.0)
+    
+    print(f"转换后先验范围: [{dirichlet_priors.min().item():.4f}, {dirichlet_priors.max().item():.4f}]")
+    
     dirichlet_priors = dirichlet_priors.to(config.DEVICE)
     return dirichlet_priors
     

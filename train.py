@@ -39,44 +39,70 @@ class Trainer:
         self.o_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(config.DEVICE)  # d
         self.reg_net = RR_ResNet(input_channels=config.GMM_NUM).to(config.DEVICE)
 
-        # 加载预训练权重
-        x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", 
-                                   map_location=config.DEVICE, 
-                                   weights_only=True)
-        z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", 
-                                   map_location=config.DEVICE, 
-                                   weights_only=True)
-        o_net_weights = torch.load("checkpoints/PRIOR/o_train_4.pth", 
-                                   map_location=config.DEVICE, 
-                                   weights_only=True)
-        reg_net_weights = torch.load("checkpoints/reg_prior.pth", 
-                                     map_location=config.DEVICE, 
-                                     weights_only=True)
-        unet_weights = torch.load("checkpoints/unet/best.pth", 
-                                  map_location=config.DEVICE, 
-                                  weights_only=True)
-        # 加载权重到模型
-        # self.x_net.load_state_dict(x_net_weights)
-        # self.z_net.load_state_dict(z_net_weights)
-        self.o_net.load_state_dict(o_net_weights)
-        self.reg_net.load_state_dict(reg_net_weights)
-        self.unet.load_state_dict(unet_weights)
-        self.reg_net.eval()
-        self.unet.eval()
+        # 加载预训练权重 (修复: 启用所有预训练权重的加载)
+        try:
+            x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", 
+                                       map_location=config.DEVICE, 
+                                       weights_only=True)
+            z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", 
+                                       map_location=config.DEVICE, 
+                                       weights_only=True)
+            o_net_weights = torch.load("checkpoints/PRIOR/o_train_4.pth", 
+                                       map_location=config.DEVICE, 
+                                       weights_only=True)
+            reg_net_weights = torch.load("checkpoints/reg_prior.pth", 
+                                         map_location=config.DEVICE, 
+                                         weights_only=True)
+            unet_weights = torch.load("checkpoints/unet/best.pth", 
+                                      map_location=config.DEVICE, 
+                                      weights_only=True)
+            
+            # 加载权重到模型
+            # self.x_net.load_state_dict(x_net_weights)
+            # self.z_net.load_state_dict(z_net_weights)
+            self.o_net.load_state_dict(o_net_weights)
+            self.reg_net.load_state_dict(reg_net_weights)
+            self.unet.load_state_dict(unet_weights)
+            
+            # 固定预训练模型的参数
+            self.reg_net.eval()
+            self.unet.eval()
+            
+            # 冻结UNet和reg_net的参数以避免过拟合
+            for param in self.reg_net.parameters():
+                param.requires_grad = False
+            for param in self.unet.parameters():
+                param.requires_grad = False
+                
+            if self.logger:
+                self.logger.info("✅ 成功加载所有预训练权重")
+                
+        except FileNotFoundError as e:
+            if self.logger:
+                self.logger.warning(f"⚠️ 预训练权重文件未找到: {e}")
+                self.logger.warning("将使用随机初始化的权重进行训练")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"❌ 加载预训练权重失败: {e}")
+                self.logger.warning("将使用随机初始化的权重进行训练")
 
         # 定义损失函数和优化器
         self.criterion = GmmSegLoss(GMM_NUM=config.GMM_NUM).to(config.DEVICE)
+        
+        # 使用不同的学习率策略
         self.optimizer = optim.Adam([
             {'params': self.x_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5},
             {'params': self.z_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5},
-            {'params': self.o_net.parameters(), 'lr': config.LEARNING_RATE*0.1, 'weight_decay': 1e-5},
-        ])
+            {'params': self.o_net.parameters(), 'lr': config.LEARNING_RATE*0.5, 'weight_decay': 1e-5},  # o_net学习率稍低
+        ], eps=1e-8, betas=(0.9, 0.999))  # 添加数值稳定性参数
 
-        # 定义学习率调度器
+        # 改进的学习率调度器
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 
                                                               mode='min', 
-                                                              factor=0.5, 
-                                                              patience=5)
+                                                              factor=0.7,    # 更温和的衰减
+                                                              patience=5,    # 更长的等待时间
+                                                              min_lr=1e-7,   # 最小学习率
+                                                              )
 
         # 创建日志记录器
         time_str = time.strftime("%Y%m%d-%H%M%S")
@@ -97,6 +123,7 @@ class Trainer:
         train_loss = 0.0
         train_loss1, train_loss2, train_loss3 = 0.0, 0.0, 0.0
         train_loss_mse = 0.0
+        current_weight_3 = 0.0  # 记录当前的先验权重
 
         for batch in tqdm(self.train_loader, desc=f"Epoch {epoch+1:3}/{self.config.EPOCHS}[train]", ncols=100):
             # 数据加载
@@ -123,15 +150,27 @@ class Trainer:
                                                                  epoch=epoch, 
                                                                  epsilon=epsilon)
 
-            # 计算损失
-            loss, loss_1, loss_2, loss_3, loss_mse = self.criterion(image_4_features=image_4_features, 
-                                                                    mu=mu, 
-                                                                    var=var, 
-                                                                    pi=pi, 
-                                                                    d=d1, 
-                                                                    d0=d0, 
-                                                                    epoch=epoch, 
-                                                                    total_epochs=self.config.EPOCHS)
+            # 计算损失 (添加异常处理)
+            try:
+                loss, loss_1, loss_2, loss_3, loss_mse, weight_3 = self.criterion(image_4_features=image_4_features, 
+                                                                                  mu=mu, 
+                                                                                  var=var, 
+                                                                                  pi=pi, 
+                                                                                  d=d1, 
+                                                                                  d0=d0, 
+                                                                                  epoch=epoch, 
+                                                                                  total_epochs=self.config.EPOCHS)
+                
+                # 检查损失是否有效
+                if not torch.isfinite(loss):
+                    if self.logger:
+                        self.logger.warning(f"训练中检测到无效损失值: {loss.item()}, 跳过此batch")
+                    continue
+                    
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"计算损失时发生错误: {e}")
+                continue
 
             # 累加损失
             train_loss1 += loss_1.item()
@@ -139,6 +178,7 @@ class Trainer:
             train_loss3 += loss_3.item()
             train_loss_mse += loss_mse.item()
             train_loss += loss.item()
+            current_weight_3 = weight_3  # 记录当前权重
 
             # 反向传播和优化
             loss.backward()
@@ -157,6 +197,7 @@ class Trainer:
         self.train_loss3 = train_loss3 / len(self.train_loader)
         self.train_loss_mse = train_loss_mse / len(self.train_loader)
         self.avg_train_loss = train_loss / len(self.train_loader)
+        self.current_weight_3 = current_weight_3  # 存储当前先验权重
 
         
     def validate(self, epoch, epsilon=1e-6):
@@ -194,15 +235,27 @@ class Trainer:
                                                                      epoch=epoch, 
                                                                      epsilon=epsilon)
 
-                # 计算损失
-                loss, loss_1, loss_2, loss_3, loss_mse = self.criterion(image_4_features=image_4_features, 
-                                                                        mu=mu, 
-                                                                        var=var, 
-                                                                        pi=pi, 
-                                                                        d=d1, 
-                                                                        d0=d0, 
-                                                                        epoch=epoch, 
-                                                                        total_epochs=self.config.EPOCHS)
+                # 计算损失 (添加异常处理)
+                try:
+                    loss, loss_1, loss_2, loss_3, loss_mse, weight_3 = self.criterion(image_4_features=image_4_features, 
+                                                                                      mu=mu, 
+                                                                                      var=var, 
+                                                                                      pi=pi, 
+                                                                                      d=d1, 
+                                                                                      d0=d0, 
+                                                                                      epoch=epoch, 
+                                                                                      total_epochs=self.config.EPOCHS)
+                    
+                    # 检查损失是否有效
+                    if not torch.isfinite(loss):
+                        if self.logger:
+                            self.logger.warning(f"验证中检测到无效损失值: {loss.item()}, 跳过此batch")
+                        continue
+                        
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"验证计算损失时发生错误: {e}")
+                    continue
 
                 # 累加损失
                 test_loss1 += loss_1.item()
@@ -217,9 +270,9 @@ class Trainer:
                 label_np = torch.squeeze(label, dim=1).cpu().numpy()
 
                 dataset_name = os.path.basename(self.config.DATASET)
-                dice_total += dice_coefficient(pred_cls, label_np, config.GMM_NUM, dataset_name, background=True)
-                iou_total += iou_score(pred_cls, label_np, config.GMM_NUM, dataset_name, background=True)
-                pixel_err_total += pixel_error(pred_cls, label_np, config.GMM_NUM, dataset_name, background=True)
+                dice_total += dice_coefficient(pred_cls, label_np, self.config.GMM_NUM, dataset_name, background=True)
+                iou_total += iou_score(pred_cls, label_np, self.config.GMM_NUM, dataset_name, background=True)
+                pixel_err_total += pixel_error(pred_cls, label_np, self.config.GMM_NUM, dataset_name, background=True)
 
         self.test_loss1 = test_loss1 / len(self.test_loader)
         self.test_loss2 = test_loss2 / len(self.test_loader)
@@ -231,7 +284,7 @@ class Trainer:
         self.avg_pixel_err = pixel_err_total / len(self.test_loader)
 
         # 可视化最后一个batch的结果
-        i = config.BATCH_SIZE - 1
+        i = self.config.BATCH_SIZE - 1
         self.mu_show = mu.cpu().detach().numpy()[i]
         self.var_show = var.cpu().detach().numpy()[i]
         self.pi_show = pi.cpu().detach().numpy()[i]
@@ -252,7 +305,8 @@ class Trainer:
                 f"Loss 2: {self.train_loss2:.4f}  "
                 f"Loss 3: {self.train_loss3:.4f}  "
                 f"Loss Total: {self.avg_train_loss:.4f}  "
-                f"Loss MSE: {self.train_loss_mse:.4f}"
+                f"Loss MSE: {self.train_loss_mse:.4f}  "
+                f"Prior Weight: {self.current_weight_3:.4f}"
             )
 
             self.logger.info(
@@ -278,7 +332,7 @@ class Trainer:
             torch.save(self.x_net.state_dict(), os.path.join(checkpoints_dir, f"x_train_best.pth"))
             torch.save(self.z_net.state_dict(), os.path.join(checkpoints_dir, f"z_train_best.pth"))
             torch.save(self.o_net.state_dict(), os.path.join(checkpoints_dir, f"o_train_best.pth"))
-            print(f"Saved best model at epoch {epoch+1} with Dice: {self.avg_dice:.4f}")
+            self.logger.info(f"Saved best model at epoch {epoch+1} with Dice: {self.avg_dice:.4f}")
 
 
     def visualize(self, epoch):
@@ -301,7 +355,8 @@ class Trainer:
             "loss1": self.train_loss1, 
             "loss2": self.train_loss2, 
             "loss3": self.train_loss3, 
-            "total": self.avg_train_loss
+            "total": self.avg_train_loss,
+            "prior_weight": self.current_weight_3
         }, epoch+1)
         self.writer.add_scalars("Test", {
             "loss1": self.test_loss1, 

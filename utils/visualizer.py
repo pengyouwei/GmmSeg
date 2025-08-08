@@ -15,7 +15,23 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
     # 打印统计信息
     if logger:
         # 打印mu, var, pi的统计信息
-        pass
+        logger.info(f"=== Slice {slice_id} 参数统计 ===")
+        logger.info(f"μ 范围: [{mu_show.min():.3f}, {mu_show.max():.3f}] (期望: [-4, 4])")
+        logger.info(f"σ² 范围: [{var_show.min():.6f}, {var_show.max():.3f}] (期望: [1e-6, 2.25])")
+        logger.info(f"π 范围: [{pi_show.min():.3f}, {pi_show.max():.3f}] (期望: [0, 1])")
+        logger.info(f"特征 范围: [{feature_show.min():.3f}, {feature_show.max():.3f}] (期望: [-3, 3])")
+        
+        # 检查参数是否在预期范围内
+        mu_in_range = (mu_show.min() >= -4.1) and (mu_show.max() <= 4.1)
+        var_in_range = (var_show.min() >= 0) and (var_show.max() <= 2.3)
+        pi_in_range = (pi_show.min() >= -0.01) and (pi_show.max() <= 1.01)
+        
+        if not mu_in_range:
+            logger.warning(f"⚠️  μ 超出预期范围 [-4, 4]!")
+        if not var_in_range:
+            logger.warning(f"⚠️  σ² 超出预期范围 [1e-6, 2.25]!")
+        if not pi_in_range:
+            logger.warning(f"⚠️  π 超出预期范围 [0, 1]!")
     
     # 第一个可视化图形 - mu, var, pi
     fig = plt.figure(figsize=(15, 8))
@@ -40,7 +56,7 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
     mu_axes = []
     for j in range(4):
         ax = fig.add_subplot(gs[0, j + 1])
-        im = ax.imshow(mu_show[j], cmap='gray', vmin=-1.2, vmax=1.2)
+        im = ax.imshow(mu_show[j], cmap='gray', vmin=-4.0, vmax=4.0)
         ax.set_title(f'μ_{j}\n[{mu_show[j].min():.2f}, {mu_show[j].max():.2f}]')
         ax.axis('off')
         mu_axes.append((ax, im))
@@ -50,11 +66,10 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
     cbar_mu.set_label('μ value', rotation=270, labelpad=15)
     
     # 显示 var 的四个通道
-    var_max = var_show.max()
     var_axes = []
     for j in range(4):
         ax = fig.add_subplot(gs[1, j + 1])
-        im = ax.imshow(var_show[j], cmap='gray', vmin=0, vmax=var_max)
+        im = ax.imshow(var_show[j], cmap='gray', vmin=0, vmax=2.25)
         ax.set_title(f'σ²_{j}\n[{var_show[j].min():.3f}, {var_show[j].max():.3f}]')
         ax.axis('off')
         var_axes.append((ax, im))
@@ -99,7 +114,7 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
 
     for j in range(4):
         ax = fig2.add_subplot(gs2[0, j + 2])
-        ax.imshow(d0_show[j], cmap='gray', vmin=0, vmax=1)
+        ax.imshow(d0_show[j], cmap='gray', vmin=0.5, vmax=10)
         ax.set_title(f'd0_{j}_{slice_id}', fontsize=10)
         ax.axis('off')
     
@@ -111,7 +126,7 @@ def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
 
     for j in range(4):
         ax = fig2.add_subplot(gs2[1, j + 2])
-        ax.imshow(d1_show[j], cmap='gray', vmin=0, vmax=1)
+        ax.imshow(d1_show[j], cmap='gray', vmin=0.5, vmax=10)
         ax.set_title(f'd1_{j}', fontsize=10)
         ax.axis('off')
 

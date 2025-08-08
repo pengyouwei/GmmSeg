@@ -9,13 +9,34 @@ from utils.affine_transform import random_affine_params, apply_affine_transform
 
 
 def compute_prior(label, gmm_num=4, img_size=128):
-    """计算先验概率分布"""
+    """计算狄利克雷先验参数（修正版本）"""
     prior = np.zeros((gmm_num, img_size, img_size), dtype=np.float32)
     cls_map = {0:0, 1:85, 2:170, 3:255}
+    
+    # 生成二值掩码
     for k in range(gmm_num):
         prior[k] = (label.squeeze().cpu().numpy() == cls_map[k]).astype(np.float32)
-    prior = np.clip(prior, a_min=1e-8, a_max=None)
-    prior = prior / (np.sum(prior, axis=0, keepdims=True))
+    
+    # 计算每个类别的像素统计
+    pixel_counts = np.sum(prior, axis=(1, 2), keepdims=True)
+    total_pixels = np.sum(pixel_counts)
+    
+    # 转换为狄利克雷浓度参数
+    base_concentration = 2.0  # 基础浓度
+    max_concentration = 8.0   # 最大浓度
+    
+    for k in range(gmm_num):
+        if pixel_counts[k] > 0:
+            # 根据像素比例调整浓度参数
+            ratio = pixel_counts[k] / total_pixels
+            concentration = base_concentration + ratio * (max_concentration - base_concentration)
+            prior[k] = prior[k] * concentration + base_concentration
+        else:
+            # 不存在的类别设置较小的先验浓度
+            prior[k] = np.full_like(prior[k], base_concentration * 0.5)
+    
+    # 确保参数在合理范围
+    prior = np.clip(prior, a_min=0.5, a_max=10.0)
     return torch.tensor(prior, dtype=torch.float32)
 
 
@@ -102,8 +123,29 @@ class ACDCDataset(Dataset):
         cls_map = {0:0, 1:85, 2:170, 3:255}
         for k in range(self.gmm_num):
             prior[k] = (label.squeeze().cpu().numpy() == cls_map[k]).astype(np.float32)
-        prior = np.clip(prior, a_min=1e-8, a_max=None) # [4, H, W]
-        prior = prior / (np.sum(prior, axis=0, keepdims=True)) # 归一化 [4, H, W]
+        
+        # 修正：将概率转换为合适的狄利克雷参数
+        # 方法1: 基于像素比例生成浓度参数
+        prior = np.clip(prior, a_min=1e-8, a_max=None)
+        pixel_counts = np.sum(prior, axis=(1, 2), keepdims=True)  # 每个类别的像素数
+        total_pixels = np.sum(pixel_counts)
+        
+        # 将像素比例转换为狄利克雷浓度参数（推荐范围：1-10）
+        base_concentration = 2.0  # 基础浓度
+        max_concentration = 8.0   # 最大浓度
+        
+        for k in range(self.gmm_num):
+            if pixel_counts[k] > 0:
+                # 根据该类别的像素比例调整浓度
+                ratio = pixel_counts[k] / total_pixels
+                concentration = base_concentration + ratio * (max_concentration - base_concentration)
+                prior[k] = prior[k] * concentration + base_concentration
+            else:
+                # 对于不存在的类别，设置较小的浓度参数
+                prior[k] = np.full_like(prior[k], base_concentration * 0.5)
+        
+        # 确保所有参数都在合理范围内
+        prior = np.clip(prior, a_min=0.5, a_max=10.0)
         prior = torch.tensor(prior, dtype=torch.float32) # [4, H, W]
 
         return {
