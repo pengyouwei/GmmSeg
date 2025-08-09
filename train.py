@@ -4,10 +4,9 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from utils.loss import GmmSegLoss
+from utils.loss import GmmLoss, DirichletGmmLoss
 from utils.train_utils import forward_pass
 from utils.visualizer import create_visualization
-from utils.calc_post_probs import calculate_posterior_probs
 from utils.metrics import dice_coefficient, iou_score, pixel_error
 from utils.dataloader import get_loaders, get_dirichlet_priors
 from models.unet import UNet
@@ -35,25 +34,29 @@ class Trainer:
         # 定义模型
         self.unet = UNet(config.IN_CHANNELS, config.FEATURE_NUM).to(config.DEVICE)  # UNet 用于提取特征
         self.x_net = UNet(config.FEATURE_NUM, config.FEATURE_NUM*config.GMM_NUM*2).to(config.DEVICE)  # mu, var
-        self.z_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(config.DEVICE)  # pi
+        # Dirichlet 模式下无需 z_net
+        if not config.USE_DIRICHLET_MIX:
+            self.z_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(config.DEVICE)  # pi
+        else:
+            self.z_net = None
         self.o_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(config.DEVICE)  # d
         self.reg_net = RR_ResNet(input_channels=config.GMM_NUM).to(config.DEVICE)
 
         # 加载预训练权重 (修复: 启用所有预训练权重的加载)
         try:
-            x_net_weights = torch.load("checkpoints/PRIOR/x_train_4.pth", 
+            x_net_weights = torch.load("checkpoints/unet/x_pretrained.pth", 
                                        map_location=config.DEVICE, 
                                        weights_only=True)
-            z_net_weights = torch.load("checkpoints/PRIOR/z_train_4.pth", 
+            z_net_weights = torch.load("checkpoints/unet/z_pretrained.pth", 
                                        map_location=config.DEVICE, 
                                        weights_only=True)
-            o_net_weights = torch.load("checkpoints/PRIOR/o_train_4.pth", 
+            o_net_weights = torch.load("checkpoints/unet/o_pretrained.pth", 
                                        map_location=config.DEVICE, 
                                        weights_only=True)
-            reg_net_weights = torch.load("checkpoints/reg_prior.pth", 
+            reg_net_weights = torch.load("checkpoints/regnet/dirichlet_registration.pth", 
                                          map_location=config.DEVICE, 
                                          weights_only=True)
-            unet_weights = torch.load("checkpoints/unet/best.pth", 
+            unet_weights = torch.load("checkpoints/unet/feature_extraction.pth", 
                                       map_location=config.DEVICE, 
                                       weights_only=True)
             
@@ -87,14 +90,19 @@ class Trainer:
                 self.logger.warning("将使用随机初始化的权重进行训练")
 
         # 定义损失函数和优化器
-        self.criterion = GmmSegLoss(GMM_NUM=config.GMM_NUM).to(config.DEVICE)
+        if self.config.USE_DIRICHLET_MIX:
+            self.criterion = DirichletGmmLoss(GMM_NUM=config.GMM_NUM, nll_warmup_epochs=self.config.NLL_WARMUP_EPOCHS).to(config.DEVICE)
+        else:
+            self.criterion = GmmLoss(GMM_NUM=config.GMM_NUM).to(config.DEVICE)
         
         # 使用不同的学习率策略
-        self.optimizer = optim.Adam([
+        opt_params = [
             {'params': self.x_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5},
-            {'params': self.z_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5},
-            {'params': self.o_net.parameters(), 'lr': config.LEARNING_RATE*0.5, 'weight_decay': 1e-5},  # o_net学习率稍低
-        ], eps=1e-8, betas=(0.9, 0.999))  # 添加数值稳定性参数
+            {'params': self.o_net.parameters(), 'lr': config.LEARNING_RATE*0.5, 'weight_decay': 1e-5},
+        ]
+        if self.z_net is not None:
+            opt_params.insert(1, {'params': self.z_net.parameters(), 'lr': config.LEARNING_RATE, 'weight_decay': 1e-5})
+        self.optimizer = optim.Adam(opt_params, eps=1e-8, betas=(0.9, 0.999))
 
         # 改进的学习率调度器
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 
@@ -117,7 +125,8 @@ class Trainer:
 
     def train_one_epoch(self, epoch, epsilon=1e-6):
         self.x_net.train()
-        self.z_net.train()
+        if self.z_net is not None:
+            self.z_net.train()
         self.o_net.train()
 
         train_loss = 0.0
@@ -149,24 +158,37 @@ class Trainer:
                                                                  config=self.config, 
                                                                  epoch=epoch, 
                                                                  epsilon=epsilon)
-
+            # d0 = prior
             # 计算损失 (添加异常处理)
             try:
-                loss, loss_1, loss_2, loss_3, loss_mse, weight_3 = self.criterion(image_4_features=image_4_features, 
-                                                                                  mu=mu, 
-                                                                                  var=var, 
-                                                                                  pi=pi, 
-                                                                                  d=d1, 
-                                                                                  d0=d0, 
-                                                                                  epoch=epoch, 
-                                                                                  total_epochs=self.config.EPOCHS)
-                
-                # 检查损失是否有效
+                if self.config.USE_DIRICHLET_MIX:
+                    out = self.criterion(input=image_4_features,
+                                          mu=mu,
+                                          var=var,
+                                          d=d1,
+                                          d0=d0,
+                                          epoch=epoch,
+                                          total_epochs=self.config.EPOCHS)
+                else:
+                    out = self.criterion(input=image_4_features,
+                                          mu=mu,
+                                          var=var,
+                                          pi=pi,
+                                          d=d1,
+                                          d0=d0,
+                                          epoch=epoch,
+                                          total_epochs=self.config.EPOCHS)
+                loss = out['total']
+                loss_1 = out['recon']
+                loss_2 = out.get('kl_pi', torch.tensor(0.0, device=loss.device))
+                loss_3 = out.get('kl_dir', torch.tensor(0.0, device=loss.device))
+                loss_mse = out.get('loss_mse', torch.tensor(0.0, device=loss.device))
+                current_weight_3 = out['w_dir'].item() if torch.is_tensor(out['w_dir']) else float(out['w_dir'])
+
                 if not torch.isfinite(loss):
                     if self.logger:
                         self.logger.warning(f"训练中检测到无效损失值: {loss.item()}, 跳过此batch")
                     continue
-                    
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"计算损失时发生错误: {e}")
@@ -178,14 +200,14 @@ class Trainer:
             train_loss3 += loss_3.item()
             train_loss_mse += loss_mse.item()
             train_loss += loss.item()
-            current_weight_3 = weight_3  # 记录当前权重
 
             # 反向传播和优化
             loss.backward()
 
             # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(self.x_net.parameters(), max_norm=5.0)
-            torch.nn.utils.clip_grad_norm_(self.z_net.parameters(), max_norm=5.0)
+            if self.z_net is not None:
+                torch.nn.utils.clip_grad_norm_(self.z_net.parameters(), max_norm=5.0)
             torch.nn.utils.clip_grad_norm_(self.o_net.parameters(), max_norm=5.0)
 
             # 更新参数
@@ -202,7 +224,8 @@ class Trainer:
         
     def validate(self, epoch, epsilon=1e-6):
         self.x_net.eval()
-        self.z_net.eval()
+        if self.z_net is not None:
+            self.z_net.eval()
         self.o_net.eval()
 
         test_loss = 0
@@ -234,24 +257,46 @@ class Trainer:
                                                                      config=self.config, 
                                                                      epoch=epoch, 
                                                                      epsilon=epsilon)
-
+                # d0 = prior
                 # 计算损失 (添加异常处理)
                 try:
-                    loss, loss_1, loss_2, loss_3, loss_mse, weight_3 = self.criterion(image_4_features=image_4_features, 
-                                                                                      mu=mu, 
-                                                                                      var=var, 
-                                                                                      pi=pi, 
-                                                                                      d=d1, 
-                                                                                      d0=d0, 
-                                                                                      epoch=epoch, 
-                                                                                      total_epochs=self.config.EPOCHS)
-                    
-                    # 检查损失是否有效
+                    if self.config.USE_DIRICHLET_MIX:
+                        out = self.criterion(input=image_4_features,
+                                              mu=mu,
+                                              var=var,
+                                              d=d1,
+                                              d0=d0,
+                                              epoch=epoch,
+                                              total_epochs=self.config.EPOCHS)
+                    else:
+                        out = self.criterion(input=image_4_features,
+                                              mu=mu,
+                                              var=var,
+                                              pi=pi,
+                                              d=d1,
+                                              d0=d0,
+                                              epoch=epoch,
+                                              total_epochs=self.config.EPOCHS)
+                    loss = out['total']
+                    loss_1 = out['recon']
+                    loss_2 = out.get('kl_pi', torch.tensor(0.0, device=loss.device))
+                    loss_3 = out.get('kl_dir', torch.tensor(0.0, device=loss.device))
+                    loss_mse = out.get('loss_mse', torch.tensor(0.0, device=loss.device))
+                    weight_3 = out['w_dir']
+                    pred_basis = out['post_prob']
+                    used_nll = out.get('used_nll', None)
+                    if used_nll is not None:
+                        # 计算 posterior 熵 (用于日志与监控组件利用率)
+                        with torch.no_grad():
+                            pb = pred_basis.clamp_min(1e-8)
+                            ent = -(pb * pb.log()).sum(dim=1).mean().item()
+                        self.last_posterior_entropy = ent
+                        self.last_used_nll = bool(used_nll)
+
                     if not torch.isfinite(loss):
                         if self.logger:
                             self.logger.warning(f"验证中检测到无效损失值: {loss.item()}, 跳过此batch")
                         continue
-                        
                 except Exception as e:
                     if self.logger:
                         self.logger.error(f"验证计算损失时发生错误: {e}")
@@ -265,8 +310,7 @@ class Trainer:
                 test_loss += loss.item()
 
                 # 计算评价指标
-                posterior_probs = calculate_posterior_probs(image_4_features, mu, var, pi, self.config.GMM_NUM)
-                pred_cls = torch.argmax(posterior_probs, dim=1).cpu().numpy()
+                pred_cls = torch.argmax(pred_basis, dim=1).cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).cpu().numpy()
 
                 dataset_name = os.path.basename(self.config.DATASET)
@@ -285,16 +329,21 @@ class Trainer:
 
         # 可视化最后一个batch的结果
         i = self.config.BATCH_SIZE - 1
-        self.mu_show = mu.cpu().detach().numpy()[i]
-        self.var_show = var.cpu().detach().numpy()[i]
-        self.pi_show = pi.cpu().detach().numpy()[i]
-        self.d0_show = d0.cpu().detach().numpy()[i]
-        self.d1_show = d1.cpu().detach().numpy()[i]
-        self.image_show = image[i].squeeze().cpu().detach().numpy()
-        self.feature_show = image_4_features[i].squeeze().cpu().detach().numpy()
-        self.label_show = label_np[i]
-        self.pred_show = pred_cls[i]
-        self.slice_id = slice_info[i].item() 
+        try:
+            self.mu_show = mu.cpu().detach().numpy()[i]
+            self.var_show = var.cpu().detach().numpy()[i]
+            # 保存用于展示的概率图：Dirichlet 模式下为 posterior r；传统模式下为 gating π
+            self.pi_show = pred_basis.cpu().detach().numpy()[i]
+            self.d0_show = d0.cpu().detach().numpy()[i]
+            self.d1_show = d1.cpu().detach().numpy()[i]
+            self.image_show = image[i].squeeze().cpu().detach().numpy()
+            self.feature_show = image_4_features[i].squeeze().cpu().detach().numpy()
+            self.label_show = label_np[i]
+            self.pred_show = pred_cls[i]
+            self.slice_id = slice_info[i].item()
+        except Exception:
+            # 可能 batch 不满或索引越界，忽略可视化
+            pass
 
 
     def print_log_info(self, epoch):
@@ -306,7 +355,7 @@ class Trainer:
                 f"Loss 3: {self.train_loss3:.4f}  "
                 f"Loss Total: {self.avg_train_loss:.4f}  "
                 f"Loss MSE: {self.train_loss_mse:.4f}  "
-                f"Prior Weight: {self.current_weight_3:.4f}"
+                f"Weight_of_loss3: {self.current_weight_3:.4f}"
             )
 
             self.logger.info(
@@ -317,21 +366,25 @@ class Trainer:
                 f"Loss MSE: {self.test_loss_mse:.4f}"
             )
 
+            extra = ''
+            if self.config.USE_DIRICHLET_MIX:
+                extra = f" | used_nll={getattr(self, 'last_used_nll', False)} | post_entropy={getattr(self, 'last_posterior_entropy', 0.0):.3f}"
             self.logger.info(
                 f"Dice: {self.avg_dice:.4f}  "
                 f"IoU: {self.avg_iou:.4f}  "
-                f"Pixel Error: {self.avg_pixel_err:.4f}"
+                f"Pixel Error: {self.avg_pixel_err:.4f}{extra}"
             )
 
 
     def save_checkpoints(self, epoch):
-        checkpoints_dir = os.path.join(self.config.CHECKPOINTS_DIR, self.config.DATASET)
+        checkpoints_dir = os.path.join(self.config.CHECKPOINTS_DIR, "unet")
         os.makedirs(checkpoints_dir, exist_ok=True)
         if self.avg_dice > self.config.BEST_DICE:
             self.config.BEST_DICE = self.avg_dice
-            torch.save(self.x_net.state_dict(), os.path.join(checkpoints_dir, f"x_train_best.pth"))
-            torch.save(self.z_net.state_dict(), os.path.join(checkpoints_dir, f"z_train_best.pth"))
-            torch.save(self.o_net.state_dict(), os.path.join(checkpoints_dir, f"o_train_best.pth"))
+            torch.save(self.x_net.state_dict(), os.path.join(checkpoints_dir, f"x_best.pth"))
+            if self.z_net is not None:
+                torch.save(self.z_net.state_dict(), os.path.join(checkpoints_dir, f"z_best.pth"))
+            torch.save(self.o_net.state_dict(), os.path.join(checkpoints_dir, f"o_best.pth"))
             self.logger.info(f"Saved best model at epoch {epoch+1} with Dice: {self.avg_dice:.4f}")
 
 
@@ -356,7 +409,7 @@ class Trainer:
             "loss2": self.train_loss2, 
             "loss3": self.train_loss3, 
             "total": self.avg_train_loss,
-            "prior_weight": self.current_weight_3
+            "weight_of_loss3": self.current_weight_3
         }, epoch+1)
         self.writer.add_scalars("Test", {
             "loss1": self.test_loss1, 
@@ -369,6 +422,9 @@ class Trainer:
             "iou": self.avg_iou, 
             "pixel_err": self.avg_pixel_err
         }, epoch+1)
+        if self.config.USE_DIRICHLET_MIX and hasattr(self, 'last_posterior_entropy'):
+            self.writer.add_scalar("Dirichlet/posterior_entropy", self.last_posterior_entropy, epoch+1)
+            self.writer.add_scalar("Dirichlet/used_nll", int(getattr(self, 'last_used_nll', False)), epoch+1)
 
 
     def cleanup(self):

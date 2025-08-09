@@ -5,7 +5,7 @@ import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
-from utils.affine_transform import random_affine_params, apply_affine_transform
+from data.transform import random_affine_params, apply_affine_transform
 
 
 def compute_prior(label, gmm_num=4, img_size=128):
