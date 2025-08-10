@@ -105,17 +105,6 @@ class GmmLoss(nn.Module):
                 weight_3 = 0.1 - 0.09 * ((progress - 0.6) / 0.2)
             else:
                 weight_3 = 0.01
-        elif epoch is not None:
-            if epoch < 20:
-                weight_3 = 1.0
-            elif epoch < 50:
-                weight_3 = 1.0 - 0.7 * ((epoch - 20) / 30)
-            elif epoch < 100:
-                weight_3 = 0.3 - 0.2 * ((epoch - 50) / 50)
-            elif epoch < 150:
-                weight_3 = 0.1 - 0.09 * ((epoch - 100) / 50)
-            else:
-                weight_3 = 0.01
         else:
             weight_3 = 0.5
 

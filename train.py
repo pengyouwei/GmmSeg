@@ -20,11 +20,30 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 class Trainer:
-    def __init__(self, config: Config, logger: logging.Logger = None):
+    def __init__(self, config: Config):
         self.config = config
-        self.logger = logger
+        self.logger = logging.getLogger("Train GMM Segmentation")
 
     def setup(self):
+        # 设置日志记录器
+        self.logger.setLevel(logging.INFO)
+        # 创建控制台处理器
+        self.console_handler = logging.StreamHandler()
+        self.console_handler.setFormatter(logging.Formatter('[%(levelname)s] - %(message)s'))
+        # 创建文件处理器
+        logs_dir = os.path.join(self.config.LOGS_DIR, "train_logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        self.time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        self.file_handler = logging.FileHandler(f"{logs_dir}/{self.time_str}.log", encoding="utf-8", mode='a')
+        self.file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s'))
+        # 添加处理器
+        self.logger.addHandler(self.console_handler)
+        self.logger.addHandler(self.file_handler)
+
+        self.logger.info("Starting training...")
+        self.logger.info(f"Using configuration: {self.config}")
+
+
         # 加载数据集
         self.train_loader, self.test_loader = get_loaders(self.config)
 
@@ -113,13 +132,12 @@ class Trainer:
                                                               )
 
         # 创建日志记录器
-        time_str = time.strftime("%Y%m%d-%H%M%S")
-        log_dir = os.path.join(self.config.LOGS_DIR, "tensorboard", time_str)
+        log_dir = os.path.join(self.config.LOGS_DIR, "tensorboard", self.time_str)
         os.makedirs(log_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir)
 
         # 创建输出目录
-        self.output_dir = os.path.join(self.config.OUTPUT_DIR, time_str)
+        self.output_dir = os.path.join(self.config.OUTPUT_DIR, self.time_str)
         os.makedirs(self.output_dir, exist_ok=True)
 
 
@@ -429,6 +447,9 @@ class Trainer:
 
     def cleanup(self):
         self.writer.close()
+        self.logger.removeHandler(self.console_handler)
+        self.logger.removeHandler(self.file_handler)
+        self.logger.info("Training completed.")
 
 
     def run(self):
@@ -448,35 +469,7 @@ class Trainer:
 if __name__ == "__main__":
     # 获取配置
     config = get_config()
-
-    # 设置日志记录器
-    logger = logging.getLogger("Train GMM Segmentation")
-    logger.setLevel(logging.INFO)
-
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter('[%(levelname)s] - %(message)s'))
-
-    # 创建文件处理器
-    logs_dir = os.path.join(config.LOGS_DIR, "train_logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-    file_handler = logging.FileHandler(f"{logs_dir}/{time_str}.log", encoding="utf-8", mode='a')
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s'))
-
-    # 添加处理器
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
-
-    logger.info("Starting training...")
-
-    # 创建训练器并运行
-    logger.info(f"Using configuration: {config}")
-    trainer = Trainer(config, logger)
+    trainer = Trainer(config)
     trainer.run()
 
-    logger.info("Training completed.")
-
-    # 关闭处理器
-    logger.removeHandler(console_handler)
-    logger.removeHandler(file_handler)
+    

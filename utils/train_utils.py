@@ -119,8 +119,9 @@ def compute_dirichlet_priors(d, slice_info, num_of_slice_info, dirichlet_priors,
                 tx_pred = torch.clamp(affine_output[0, 1], config.SHIFT_RANGE[0], config.SHIFT_RANGE[1])
                 ty_pred = torch.clamp(affine_output[0, 2], config.SHIFT_RANGE[0], config.SHIFT_RANGE[1])
 
-            # 仅在给定 epoch 之后应用形变（保留原逻辑）
-            if epoch >= 25:
+            # 仅在指定 epoch 之后应用配准形变
+            reg_start = getattr(config, 'REG_START_EPOCH', 25)
+            if epoch >= reg_start:
                 warped_prob = apply_affine_transform(prior_prob, scale_pred, tx_pred, ty_pred)
             else:
                 warped_prob = prior_prob

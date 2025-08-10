@@ -25,6 +25,8 @@ class Config:
     GMM_NUM: int = 4
     SCALE_RANGE: tuple = (0.5, 2.0)
     SHIFT_RANGE: tuple = (-10, 10)
+    # Registration application epoch threshold
+    REG_START_EPOCH: int = 25
     # ---- New hyper params for improved normalization & GMM stability ----
     FEATURE_NORM: str = "instance"          # choices: instance|channel|none
     MU_RANGE: float = 3.0                    # clamp mu to [-MU_RANGE, MU_RANGE]
@@ -65,6 +67,7 @@ def get_config():
     parser.add_argument('--gmm_num', type=int, default=Config.GMM_NUM)
     parser.add_argument('--scale_range', nargs=2, type=float, default=Config.SCALE_RANGE)
     parser.add_argument('--shift_range', nargs=2, type=int, default=Config.SHIFT_RANGE)
+    parser.add_argument('--reg_start_epoch', type=int, default=Config.REG_START_EPOCH)
     parser.add_argument('--feature_norm', type=str, default=Config.FEATURE_NORM,
                         choices=['instance','channel','none'])
     parser.add_argument('--mu_range', type=float, default=Config.MU_RANGE)
@@ -105,6 +108,7 @@ def get_config():
         GMM_NUM=args.gmm_num,
         SCALE_RANGE=tuple(args.scale_range),
         SHIFT_RANGE=tuple(args.shift_range),
+        REG_START_EPOCH=args.reg_start_epoch,
         FEATURE_NORM=args.feature_norm,
         MU_RANGE=args.mu_range,
         VAR_MIN=args.var_min,
