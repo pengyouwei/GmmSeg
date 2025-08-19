@@ -1,148 +1,211 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from config import Config
 
 
 def create_visualization(image_show, feature_show, mu_show, var_show, pi_show,
-                        d0_show, d1_show, label_show, pred_show, slice_id,
-                        output_dir, epoch, logger):
+                         d0_show, d1_show, label_show, pred_show, slice_id,
+                         output_dir, epoch, logger=None):
+    """根据 train.py 传入的张量补全可视化：
+    图1(3x5 灰度):
+      R1: Image + 4 个组件 μ L2 范数
+      R2: Label + 4 个组件 Var 迹
+      R3: Pred  + 4 个组件 Var log|Σ| (对角协方差 → log(prod σ²))
+    图2(3x5 灰度):
+      R1: Image + d0 4 通道 (Dirichlet 先验浓度)
+      R2: Label + d1 4 通道 (预测 Dirichlet 浓度)
+      R3: Pred  + π   4 通道 (后验/变分概率)
+
+    约束范围 (固定归一化，便于跨 epoch 比较)：
+      μ:   每组件 L2，范围估计 [0, MU_RANGE * sqrt(C)]
+      迹:  [C * VAR_MIN, C * VAR_MAX]
+      log|Σ|: [log(VAR_MIN^C), log(VAR_MAX^C)]
+      d0/d1: [0.5, 10.0]
+      π: [0,1]
+
+    仅每 5 个 epoch (含 0) 保存一次；缺失数据则跳过。
+    全部使用灰度 colormap，确保风格统一。
     """
-    保存两张 3x5 网格图片：
-    图1(3x5)：
-      R1: [Image] + mu 的 4 个通道
-      R2: [Label] + var 的 4 个通道
-      R3: [Pred ] + pi 的 4 个通道
-    图2(3x5)：
-      R1: [Image] + feature 的 4 个通道
-      R2: [Label] + d0 的 4 个通道
-      R3: [Pred ] + d1 的 4 个通道
-    """
+    cfg = Config()
     os.makedirs(output_dir, exist_ok=True)
 
-    def _norm01(x, min_val=None, max_val=None):
-        """Normalize numpy array to [0,1]. If range given, use fixed range; else use data min/max."""
-        x = np.asarray(x, dtype=np.float32)
-        if min_val is not None and max_val is not None:
-            denom = float(max_val) - float(min_val)
-            if denom <= 1e-8:
-                return np.zeros_like(x, dtype=np.float32)
-            y = (x - float(min_val)) / (denom + 1e-8)
-        else:
-            xmin = np.nanmin(x)
-            xmax = np.nanmax(x)
-            if not np.isfinite(xmin) or not np.isfinite(xmax) or (xmax - xmin) <= 1e-8:
-                return np.zeros_like(x, dtype=np.float32)
-            y = (x - xmin) / (xmax - xmin + 1e-8)
-        return np.clip(y, 0.0, 1.0)
+    # 基础校验
+    required = [image_show, mu_show, var_show, pi_show,
+                d0_show, d1_show, label_show, pred_show]
+    if any(v is None for v in required):
+        if logger:
+            logger.warning("Skip visualization: some required data is None")
+        return
 
-    # 基础范围检查与告警
-    if logger is not None:
-        try:
-            if not (-4.1 <= float(np.nanmin(mu_show)) <= 4.1 and -4.1 <= float(np.nanmax(mu_show)) <= 4.1):
-                logger.warning("μ 超出预期范围 [-4, 4]")
-        except Exception:
-            pass
-        try:
-            if not (0.0 <= float(np.nanmin(var_show)) <= 2.3 and 0.0 <= float(np.nanmax(var_show)) <= 2.3):
-                logger.warning("σ² 超出预期范围 [1e-6, 2.25]")
-        except Exception:
-            pass
-        try:
-            if not (-0.01 <= float(np.nanmin(pi_show)) <= 1.01 and -0.01 <= float(np.nanmax(pi_show)) <= 1.01):
-                logger.warning("π 超出预期范围 [0, 1]")
-        except Exception:
-            pass
+    if (epoch % 1) != 0 and epoch != 0:
+        return  # 只在每1个 epoch 或第 0 个保存
 
-    # ---------- 图1：Image + (mu, var, pi) ----------
-    fig1, axes1 = plt.subplots(3, 5, figsize=(15, 9))
-    fig1.suptitle(f"Slice {slice_id} - mu/var/pi", fontsize=12)
+    try:
+        # -------- 预处理形状 --------
+        # mu_show, var_show: [K*C, H, W] 需 reshape 为 [K,C,H,W]
+        K = cfg.GMM_NUM
+        C = cfg.FEATURE_NUM
+        H, W = mu_show.shape[-2], mu_show.shape[-1]
 
-    # R1C1: Image
-    axes1[0, 0].imshow(_norm01(image_show), cmap='gray', vmin=0, vmax=1)
-    axes1[0, 0].set_title("Image")
-    axes1[0, 0].axis('off')
+        def _safe_reshape(x):
+            if x.ndim == 3 and x.shape[0] == K * C:
+                return x.reshape(K, C, H, W)
+            if x.ndim == 4 and x.shape[0] == K and x.shape[1] == C:
+                return x
+            # 尝试自动推断 C
+            if x.ndim == 3 and (x.shape[0] % K == 0):
+                c2 = x.shape[0] // K
+                return x.reshape(K, c2, H, W)
+            return None
 
-    # R1C2-5: mu 4通道
-    for j in range(4):
-        axes1[0, j + 1].imshow(_norm01(mu_show[j], -3.0, 3.0), cmap='gray', vmin=0, vmax=1)
-        axes1[0, j + 1].set_title(f"mu[{j}]")
-        axes1[0, j + 1].axis('off')
+        mu_kc = _safe_reshape(mu_show)
+        var_kc = _safe_reshape(var_show)
+        if mu_kc is None or var_kc is None:
+            if logger:
+                logger.warning(
+                    "Skip visualization: cannot reshape mu/var to [K,C,H,W]")
+            return
 
-    # R2C1: Label
-    axes1[1, 0].imshow(_norm01(label_show), cmap='gray', vmin=0, vmax=1)
-    axes1[1, 0].set_title("Label")
-    axes1[1, 0].axis('off')
+        # 后验 / 浓度检查
+        if pi_show.ndim != 3 or pi_show.shape[0] != K:
+            if logger:
+                logger.warning("Skip visualization: pi_show shape mismatch")
+            return
+        if d0_show.ndim != 3 or d0_show.shape[0] != K:
+            if logger:
+                logger.warning("Skip visualization: d0_show shape mismatch")
+            return
+        if d1_show.ndim != 3 or d1_show.shape[0] != K:
+            if logger:
+                logger.warning("Skip visualization: d1_show shape mismatch")
+            return
 
-    # R2C2-5: var 4通道
-    for j in range(4):
-        axes1[1, j + 1].imshow(_norm01(var_show[j], 0, 2.25), cmap='gray', vmin=0, vmax=1)
-        axes1[1, j + 1].set_title(f"var[{j}]")
-        axes1[1, j + 1].axis('off')
+        # -------- 统计量计算 --------
+        mu_l2 = np.sqrt(np.sum(mu_kc ** 2, axis=1))  # [K,H,W]
+        var_tr = np.sum(var_kc, axis=1)              # [K,H,W]
+        var_det = np.prod(np.clip(var_kc, cfg.VAR_MIN,
+                          cfg.VAR_MAX), axis=1)  # [K,H,W]
+        var_logdet = np.log(
+            np.clip(var_det, cfg.VAR_MIN ** C, cfg.VAR_MAX ** C))
 
-    # R3C1: Pred
-    axes1[2, 0].imshow(_norm01(pred_show), cmap='gray', vmin=0, vmax=1)
-    axes1[2, 0].set_title("Pred")
-    axes1[2, 0].axis('off')
+        # -------- 归一化工具 --------
+        def norm_fixed(x, lo, hi):
+            x = np.asarray(x, dtype=np.float32)
+            return np.clip((x - lo) / (hi - lo + 1e-8), 0.0, 1.0)
 
-    # R3C2-5: pi 4通道
-    for j in range(4):
-        axes1[2, j + 1].imshow(_norm01(pi_show[j], 0.0, 1.0), cmap='gray', vmin=0, vmax=1)
-        axes1[2, j + 1].set_title(f"pi[{j}]")
-        axes1[2, j + 1].axis('off')
+        # 设定固定范围
+        mu_max = cfg.MU_RANGE * np.sqrt(C)
+        trace_lo, trace_hi = C * cfg.VAR_MIN, C * cfg.VAR_MAX
+        logdet_lo = C * np.log(cfg.VAR_MIN)
+        logdet_hi = C * np.log(cfg.VAR_MAX)
 
-    fig1.tight_layout(rect=[0, 0.03, 1, 0.95])
-    if epoch % 5 == 0:
-        fig1.savefig(f"{output_dir}/grid1_mu_var_pi_{epoch}.png", dpi=150)
-    plt.close(fig1)
+        # -------- 图1 --------
+        fig1, axes1 = plt.subplots(3, 5, figsize=(15, 9))
+        fig1.suptitle(
+            f"Slice {slice_id} - GMM Stats (Epoch {epoch})", fontsize=12)
 
-    # ---------- 图2：Image/feature + (d0, d1) ----------
-    fig2, axes2 = plt.subplots(3, 5, figsize=(15, 9))
-    fig2.suptitle(f"Slice {slice_id} - feature/d0/d1", fontsize=12)
+        # Row1 Col1: Image
+        axes1[0, 0].imshow(norm_fixed(image_show, image_show.min(
+        ), image_show.max()), cmap='gray', vmin=0, vmax=1)
+        axes1[0, 0].set_title("Image")
+        axes1[0, 0].axis('off')
+        # Row1 Col2-5: μ L2
+        for j in range(4):
+            ax = axes1[0, j + 1]
+            if j < K:
+                ax.imshow(norm_fixed(
+                    mu_l2[j], 0.0, mu_max), cmap='gray', vmin=0, vmax=1)
+                ax.set_title(f"muL2[{j}]")
+            ax.axis('off')
 
-    # R1C1: Image
-    axes2[0, 0].imshow(_norm01(image_show), cmap='gray', vmin=0, vmax=1)
-    axes2[0, 0].set_title("Image")
-    axes2[0, 0].axis('off')
+        # Row2 Col1: Label
+        axes1[1, 0].imshow(norm_fixed(label_show, label_show.min(
+        ), label_show.max()), cmap='gray', vmin=0, vmax=1)
+        axes1[1, 0].set_title("Label")
+        axes1[1, 0].axis('off')
+        # Row2 Col2-5: Var trace
+        for j in range(4):
+            ax = axes1[1, j + 1]
+            if j < K:
+                ax.imshow(norm_fixed(
+                    var_tr[j], trace_lo, trace_hi), cmap='gray', vmin=0, vmax=1)
+                ax.set_title(f"trΣ[{j}]")
+            ax.axis('off')
 
-    # R1C2-5: feature 4通道（取前4个）
-    # feature_show 形状应为 [C, H, W] 或 [H, W]（已 squeeze）
-    if feature_show.ndim == 2:
-        # 若只有一个通道，则复制填充
-        feat_stack = [feature_show for _ in range(4)]
-    else:
-        c = feature_show.shape[0]
-        idx = min(4, c)
-        feat_stack = [feature_show[j] for j in range(idx)]
-        if idx < 4:
-            feat_stack += [feature_show[0]] * (4 - idx)
-    for j in range(4):
-        axes2[0, j + 1].imshow(_norm01(feat_stack[j], -3.0, 3.0), cmap='gray', vmin=0, vmax=1)
-        axes2[0, j + 1].set_title(f"feat[{j}]")
-        axes2[0, j + 1].axis('off')
+        # Row3 Col1: Pred
+        axes1[2, 0].imshow(norm_fixed(pred_show, pred_show.min(
+        ), pred_show.max()), cmap='gray', vmin=0, vmax=1)
+        axes1[2, 0].set_title("Pred")
+        axes1[2, 0].axis('off')
+        # Row3 Col2-5: log|Σ|
+        for j in range(4):
+            ax = axes1[2, j + 1]
+            if j < K:
+                ax.imshow(norm_fixed(
+                    var_logdet[j], logdet_lo, logdet_hi), cmap='gray', vmin=0, vmax=1)
+                ax.set_title(f"log|Σ|[{j}]")
+            ax.axis('off')
 
-    # R2C1: Label
-    axes2[1, 0].imshow(_norm01(label_show), cmap='gray', vmin=0, vmax=1)
-    axes2[1, 0].set_title("Label")
-    axes2[1, 0].axis('off')
+        fig1.tight_layout(rect=[0, 0.03, 1, 0.95])
+        # 新命名: eXXXX_sliceS_stats.png (包含 μ L2 / trace / log|Σ|)
+        safe_slice = slice_id if isinstance(slice_id, (int, np.integer)) and slice_id >= 0 else 'u'
+        fig1.savefig(os.path.join(
+            output_dir, f"e{epoch:04d}_slice{safe_slice}_stats.png"), dpi=150, bbox_inches='tight')
+        plt.close(fig1)
 
-    # R2C2-5: d0 4通道
-    for j in range(4):
-        axes2[1, j + 1].imshow(_norm01(d0_show[j], 0.5, 10.0), cmap='gray', vmin=0, vmax=1)
-        axes2[1, j + 1].set_title(f"d0[{j}]")
-        axes2[1, j + 1].axis('off')
+        # -------- 图2 --------
+        fig2, axes2 = plt.subplots(3, 5, figsize=(15, 9))
+        fig2.suptitle(
+            f"Slice {slice_id} - d0/d1/pi (Epoch {epoch})", fontsize=12)
 
-    # R3C1: Pred
-    axes2[2, 0].imshow(_norm01(pred_show), cmap='gray', vmin=0, vmax=1)
-    axes2[2, 0].set_title("Pred")
-    axes2[2, 0].axis('off')
+        # Row1: Image + d0
+        axes2[0, 0].imshow(norm_fixed(image_show, image_show.min(
+        ), image_show.max()), cmap='gray', vmin=0, vmax=1)
+        axes2[0, 0].set_title("Image")
+        axes2[0, 0].axis('off')
+        for j in range(4):
+            ax = axes2[0, j + 1]
+            if j < K:
+                ax.imshow(norm_fixed(
+                    d0_show[j], 0.5, 10.0), cmap='gray', vmin=0, vmax=1)
+                ax.set_title(f"d0[{j}]")
+            ax.axis('off')
 
-    # R3C2-5: d1 4通道
-    for j in range(4):
-        axes2[2, j + 1].imshow(_norm01(d1_show[j], 0.5, 10.0), cmap='gray', vmin=0, vmax=1)
-        axes2[2, j + 1].set_title(f"d1[{j}]")
-        axes2[2, j + 1].axis('off')
+        # Row2: Label + d1
+        axes2[1, 0].imshow(norm_fixed(label_show, label_show.min(
+        ), label_show.max()), cmap='gray', vmin=0, vmax=1)
+        axes2[1, 0].set_title("Label")
+        axes2[1, 0].axis('off')
+        for j in range(4):
+            ax = axes2[1, j + 1]
+            if j < K:
+                ax.imshow(norm_fixed(
+                    d1_show[j], 0.5, 10.0), cmap='gray', vmin=0, vmax=1)
+                ax.set_title(f"d[{j}]")
+            ax.axis('off')
 
-    fig2.tight_layout(rect=[0, 0.03, 1, 0.95])
-    if epoch % 5 == 0:
-        fig2.savefig(f"{output_dir}/grid2_feat_d0_d1_{epoch}.png", dpi=150)
-    plt.close(fig2)
+        # Row3: Pred + pi
+        axes2[2, 0].imshow(norm_fixed(pred_show, pred_show.min(
+        ), pred_show.max()), cmap='gray', vmin=0, vmax=1)
+        axes2[2, 0].set_title("Pred")
+        axes2[2, 0].axis('off')
+        for j in range(4):
+            ax = axes2[2, j + 1]
+            if j < K:
+                ax.imshow(norm_fixed(
+                    pi_show[j], 0.0, 1.0), cmap='gray', vmin=0, vmax=1)
+                ax.set_title(f"pi[{j}]")
+            ax.axis('off')
+
+        fig2.tight_layout(rect=[0, 0.03, 1, 0.95])
+        # 新命名: eXXXX_sliceS_dirichlet.png (包含 d0 / d1 / pi)
+        fig2.savefig(os.path.join(
+            output_dir, f"e{epoch:04d}_slice{safe_slice}_dirichlet.png"), dpi=150, bbox_inches='tight')
+        plt.close(fig2)
+
+    except Exception as e:
+        if logger:
+            logger.warning(f"Visualization failed: {e}")
+        # 避免因可视化失败中断训练
+        return

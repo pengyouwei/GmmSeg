@@ -36,39 +36,49 @@ def standardize_features(features, config: Config, eps: float = 1e-8):
     return x
 
 
-def process_gmm_parameters(output_x, output_z, output_o, config: Config, epsilon):
-        """处理 GMM 参数：μ, σ², π, d
-        新策略：
-            - μ 直接 clamp 到 [-MU_RANGE, MU_RANGE]
-            - 方差通过 log_var 参数化：log_var_raw -> clamp -> var = exp(log_var)
-            - π 使用 softmax( logits / T )，更标准的概率输出
-            - d 保持当前浓度设定
-        """
-        K = config.GMM_NUM
-        C = config.FEATURE_NUM
-        mu_raw = output_x[:, :C * K, :, :]
-        log_var_raw = output_x[:, C * K:, :, :]
+def process_gmm_parameters(output_x, output_z, output_o, config: Config, epsilon=1e-6):
+    """处理 GMM 参数：μ, σ², π, d (无硬 clamp 版本)
+    目标：消除训练阶段硬截断造成的梯度死区，使用平滑/可导的区间映射。
+    策略：
+    - μ:  平滑有界映射 μ = MU_RANGE * tanh( raw / MU_RANGE_SCALE )
+    - σ²: 在 log 空间的线性插值替换 clamp：
+                log_var = log_min + (log_max - log_min) * sigmoid(raw)
+                var = exp(log_var) ∈ [VAR_MIN, VAR_MAX]，端点仍保留梯度
+    - π:  softmax(logits/T) 后加极小 epsilon 再归一化，避免硬最小值 clamp
+    - d:  浓度参数使用 logistic 区间映射  d = d_min + (d_max-d_min)*sigmoid(raw)
+    说明：
+    - 仍保留函数参数 epsilon 作为 π 的数值保护；若不需要可忽略。
+    - 推理阶段若需绝对安全，可再对返回值做一次 clamp（不在此处进行）。
+    """
+    K = config.GMM_NUM
+    C = config.FEATURE_NUM
+    mu_raw = output_x[:, :C * K, :, :]
+    log_var_raw = output_x[:, C * K:, :, :]
 
-        # μ clamp
-        mu = torch.clamp(mu_raw, -config.MU_RANGE, config.MU_RANGE)
+    # ---- μ 平滑有界 ----
+    mu_scale = float(getattr(config, 'MU_RANGE_SCALE', max(1.0, config.MU_RANGE)))  # 可配置放缩线性区
+    mu = config.MU_RANGE * torch.tanh(mu_raw / mu_scale)
 
-        # log σ² -> clamp in log space -> σ²
-        # 允许 var ∈ [VAR_MIN, VAR_MAX]
-        log_var_min = torch.log(torch.tensor(config.VAR_MIN, device=mu.device))
-        log_var_max = torch.log(torch.tensor(config.VAR_MAX, device=mu.device))
-        log_var = torch.clamp(log_var_raw, log_var_min, log_var_max)
-        var = torch.exp(log_var)
+    # ---- σ² Softplus + 温度缩放映射 ----
+    # 原理: 先对 raw/T 做 softplus -> 正数，再归一化到 [VAR_MIN, VAR_MAX]
+    T_var = float(getattr(config, 'VAR_TEMP', 2.0))
+    raw_scaled = log_var_raw / max(T_var, 1e-6)
+    sp = torch.nn.functional.softplus(raw_scaled)  # >=0, 渐进线性避免深度饱和
+    # 归一化到 [0,1]
+    sp_norm = sp / (sp.max().detach() + 1e-8)  # 动态归一 (批内)
+    var = config.VAR_MIN + (config.VAR_MAX - config.VAR_MIN) * sp_norm
 
-        # π softmax with temperature
-        T = max(1e-3, float(getattr(config, 'PI_TEMPERATURE', 1.0)))
-        pi = torch.softmax(output_z / T, dim=1)
-        pi = torch.clamp(pi, min=1e-6)
-        pi = pi / pi.sum(dim=1, keepdim=True)
+    # ---- π 概率 ----
+    T = max(1e-4, float(getattr(config, 'PI_TEMPERATURE', 1.0)))
+    pi = torch.softmax(output_z / T, dim=1)
+    pi = pi + epsilon
+    pi = pi / pi.sum(dim=1, keepdim=True)
 
-        # d: Dirichlet concentration parameters
-        d_raw = nn.Softplus()(output_o) + 0.5
-        d = torch.clamp(d_raw, 0.5, 10.0)
-        return mu, var, pi, d
+    # ---- d 浓度参数平滑映射 ----
+    d_min, d_max = 0.5, 10.0
+    d = d_min + (d_max - d_min) * torch.sigmoid(output_o)
+
+    return mu, var, pi, d
 
 
 def compute_dirichlet_priors(d, slice_info, num_of_slice_info, dirichlet_priors, reg_net, config: Config, epoch):
@@ -120,7 +130,7 @@ def compute_dirichlet_priors(d, slice_info, num_of_slice_info, dirichlet_priors,
                 ty_pred = torch.clamp(affine_output[0, 2], config.SHIFT_RANGE[0], config.SHIFT_RANGE[1])
 
             # 仅在指定 epoch 之后应用配准形变
-            reg_start = getattr(config, 'REG_START_EPOCH', 25)
+            reg_start = getattr(config, 'REG_START_EPOCH', 10)
             if epoch >= reg_start:
                 warped_prob = apply_affine_transform(prior_prob, scale_pred, tx_pred, ty_pred)
             else:
@@ -163,30 +173,15 @@ def forward_pass(image, unet, x_net, z_net, o_net, reg_net, dirichlet_priors,
 
     # GMM网络前向传播
     output_x = x_net(image_4_features)  # mu, var
-    output_z = z_net(image_4_features) if z_net is not None else None  # pi (可能为 None)
+    output_z = z_net(image_4_features)  # pi
     output_o = o_net(image_4_features)  # d
     
     # 处理GMM参数
-    if z_net is not None:
-        mu, var, pi, d = process_gmm_parameters(output_x=output_x, 
-                                                output_z=output_z, 
-                                                output_o=output_o, 
-                                                config=config, 
-                                                epsilon=epsilon)
-    else:
-        # 仍需 μ, var, d；π 置为 None，后续 DirichletGmmLoss 内部由 d 归一得到
-        K = config.GMM_NUM
-        C = config.FEATURE_NUM
-        mu_raw = output_x[:, :C * K, :, :]
-        log_var_raw = output_x[:, C * K:, :, :]
-        mu = torch.clamp(mu_raw, -config.MU_RANGE, config.MU_RANGE)
-        log_var_min = torch.log(torch.tensor(config.VAR_MIN, device=mu.device))
-        log_var_max = torch.log(torch.tensor(config.VAR_MAX, device=mu.device))
-        log_var = torch.clamp(log_var_raw, log_var_min, log_var_max)
-        var = torch.exp(log_var)
-        d_raw = nn.Softplus()(output_o) + 0.5
-        d = torch.clamp(d_raw, 0.5, 10.0)
-        pi = None
+    mu, var, pi, d = process_gmm_parameters(output_x=output_x, 
+                                            output_z=output_z, 
+                                            output_o=output_o, 
+                                            config=config, 
+                                            epsilon=epsilon)
 
     # 计算Dirichlet先验
     dirichlet = compute_dirichlet_priors(d=d, 

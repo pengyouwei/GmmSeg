@@ -1,5 +1,5 @@
 from data.transform import get_image_transform
-from utils.loss import GmmLoss, posterior_from_params
+from utils.loss import GmmLoss, compute_gmm_responsibilities
 from utils.dataloader import get_dirichlet_priors
 from utils.train_utils import forward_pass
 from models.regnet import RR_ResNet
@@ -39,19 +39,13 @@ class Predictor:
 		self.unet = UNet(config.IN_CHANNELS, config.FEATURE_NUM).to(self.device)
 		self.x_net = UNet(config.FEATURE_NUM, config.FEATURE_NUM *
 		                  config.GMM_NUM * 2).to(self.device)
-		# Dirichlet 混合模式下无需 z_net
-		if not config.USE_DIRICHLET_MIX:
-			self.z_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(self.device)
-		else:
-			self.z_net = None
+		self.z_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(self.device)
 		self.o_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(self.device)
 		self.reg_net = RR_ResNet(input_channels=config.GMM_NUM).to(self.device)
 
 		# 加载权重（若存在）
 		self._load_weights()
-		self.unet.eval(); self.x_net.eval(); self.o_net.eval(); self.reg_net.eval()
-		if self.z_net is not None:
-			self.z_net.eval()
+		self.unet.eval(); self.x_net.eval(); self.z_net.eval(); self.o_net.eval(); self.reg_net.eval()
 
 		# 先验库
 		try:
@@ -101,17 +95,10 @@ class Predictor:
 									 config=self.config,
 									 epoch=0,
 									 epsilon=1e-6)
-			if self.config.USE_DIRICHLET_MIX:
-				conc = d1.reshape(1, self.config.GMM_NUM, self.config.IMG_SIZE, self.config.IMG_SIZE)
-				pi_expect = conc / (conc.sum(dim=1, keepdim=True) + 1e-8)
-				K = self.config.GMM_NUM; C = self.config.FEATURE_NUM
-				mu_ = mu.reshape(1, K, C, self.config.IMG_SIZE, self.config.IMG_SIZE)
-				var_ = var.reshape(1, K, C, self.config.IMG_SIZE, self.config.IMG_SIZE)
-				x = features.unsqueeze(1)
-				r = posterior_from_params(x=x, mu=mu_, var=var_, pi=pi_expect)
-				prob = r[0].cpu().numpy()
-			else:
-				prob = pi[0].cpu().numpy()
+			
+			# 直接使用z_net输出的变分后验概率π_{ik}进行分类
+			# 注意：这里π_{ik}已经是归一化的概率分布
+			prob = pi.reshape(self.config.GMM_NUM, self.config.IMG_SIZE, self.config.IMG_SIZE).cpu().numpy()
 			pred = np.argmax(prob, axis=0).astype(np.uint8)
 		return pred, prob
 
@@ -177,3 +164,4 @@ if __name__ == '__main__':
 		predictor.predict_image(config.PREDICT_IMAGE)
 	if config.PREDICT_DIR:
 		predictor.predict_folder(config.PREDICT_DIR)
+	print("Prediction completed.")
