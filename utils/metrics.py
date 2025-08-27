@@ -3,14 +3,11 @@ import numpy as np
 def convert_labels(labels, dataset_name):
     if not isinstance(labels, np.ndarray):
         raise ValueError("Input labels must be a numpy array.")
-    if dataset_name not in ["ACDC"]:
-        raise ValueError(f"Unsupported dataset_name: {dataset_name}. Supported: ['ACDC']")
-        
-    new_labels = np.zeros_like(labels)
-    if dataset_name == "ACDC":
-        new_labels[labels ==  85] = 1  # RV
-        new_labels[labels == 170] = 2  # MYO
-        new_labels[labels == 255] = 3  # LV
+    if dataset_name == "ACDC_aligned":
+        new_labels = np.zeros_like(labels)
+        new_labels[labels == 1] = 1  # RV
+        new_labels[labels == 2] = 2  # MYO
+        new_labels[labels == 3] = 3  # LV
     return new_labels
 
 def preprocess_input(y_pred, y_true, dataset_name, background):

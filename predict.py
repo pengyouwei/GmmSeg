@@ -1,160 +1,83 @@
+import os
+import torch
+import numpy as np
+import matplotlib
 from data.transform import get_image_transform
-from utils.loss import GmmLoss, compute_gmm_responsibilities
-from utils.dataloader import get_dirichlet_priors
-from utils.train_utils import forward_pass
 from models.regnet import RR_ResNet
 from models.unet import UNet
 from config import get_config, Config
 from torchvision import transforms
 import matplotlib.pyplot as plt
-import os
-import torch
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-
-
-CLASS_COLORS = {
-	0: (0, 0, 0),       # 背景 黑
-	1: (0, 0, 255),     # 左心室 蓝 (BGR→后续转RGB时处理)
-	2: (0, 255, 0),     # 心肌 绿
-	3: (255, 0, 0),     # 右心室 红
-}
-
-
-def label_to_color(mask: np.ndarray) -> np.ndarray:
-	"""将整数标签mask(H,W)转为彩色RGB(H,W,3)."""
-	h, w = mask.shape
-	color = np.zeros((h, w, 3), dtype=np.uint8)
-	for k, (r, g, b) in CLASS_COLORS.items():
-		color[mask == k] = (r, g, b)
-	return color
+from PIL import Image
+from utils.train_utils import standardize_features
+# matplotlib.use('Agg')
 
 
 class Predictor:
-	def __init__(self, config: Config, device=None):
+	def __init__(self, config: Config):
 		self.config = config
-		self.device = device or config.DEVICE
-		# 模型结构与训练一致
+		self.device = config.DEVICE
+		self.transform_image = get_image_transform(config.IMG_SIZE)
 		self.unet = UNet(config.IN_CHANNELS, config.FEATURE_NUM).to(self.device)
-		self.x_net = UNet(config.FEATURE_NUM, config.FEATURE_NUM *
-		                  config.GMM_NUM * 2).to(self.device)
 		self.z_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(self.device)
-		self.o_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(self.device)
-		self.reg_net = RR_ResNet(input_channels=config.GMM_NUM).to(self.device)
+		self.load_weights()
+		self.unet.eval()
+		self.z_net.eval()
 
-		# 加载权重（若存在）
-		self._load_weights()
-		self.unet.eval(); self.x_net.eval(); self.z_net.eval(); self.o_net.eval(); self.reg_net.eval()
-
-		# 先验库
-		try:
-			self.dirichlet_priors = get_dirichlet_priors(config)
-		except Exception:
-			# 若缺失，创建均匀先验
-			self.dirichlet_priors = torch.full((10, config.GMM_NUM, config.IMG_SIZE, config.IMG_SIZE),
-										   1.0/config.GMM_NUM, device=self.device)
-
-		# 图像 transform
-		self.img_transform = get_image_transform(config.IMG_SIZE)
-
-	def _load_weights(self):
-		ckpt_dir = self.config.CHECKPOINTS_DIR
-		mapping = {
-			'unet': ('unet/feature_extraction.pth', self.unet),
-			'x_net': ('unet/x_best.pth', self.x_net),
-			'z_net': ('unet/z_best.pth', self.z_net),
-			'o_net': ('unet/o_best.pth', self.o_net),
-			'reg_net': ('regnet/dirichlet_registration.pth', self.reg_net),
-		}
-		for name, (rel, module) in mapping.items():
-			path = os.path.join(ckpt_dir, rel)
-			if os.path.isfile(path):
-				try:
-					state = torch.load(path, map_location=self.device, weights_only=True)
-					module.load_state_dict(state, strict=False)
-				except Exception:
-					pass
-
-	def _infer_tensor(self, img_tensor: torch.Tensor):
-		"""前向推理，返回 (pred_mask, prob_map[K,H,W])。
-		Dirichlet 模式下 prob_map 为 posterior r；传统模式为 π。"""
-		with torch.no_grad():
-			# 构造假 slice_info (batch=1)
-			slice_info = torch.tensor([0])
-			slice_num = torch.tensor([1])
-			features, mu, var, pi, d1, d0 = forward_pass(image=img_tensor,
-									 unet=self.unet,
-									 x_net=self.x_net,
-									 z_net=self.z_net,
-									 o_net=self.o_net,
-									 reg_net=self.reg_net,
-									 dirichlet_priors=self.dirichlet_priors,
-									 slice_info=slice_info,
-									 num_of_slice_info=slice_num,
-									 config=self.config,
-									 epoch=0,
-									 epsilon=1e-6)
-			
-			# 直接使用z_net输出的变分后验概率π_{ik}进行分类
-			# 注意：这里π_{ik}已经是归一化的概率分布
-			prob = pi.reshape(self.config.GMM_NUM, self.config.IMG_SIZE, self.config.IMG_SIZE).cpu().numpy()
-			pred = np.argmax(prob, axis=0).astype(np.uint8)
-		return pred, prob
+	def load_weights(self):
+		unet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'unet_best.pth')
+		znet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'z_best.pth')
+		self.unet.load_state_dict(torch.load(unet_weight_path, map_location=self.device))
+		self.z_net.load_state_dict(torch.load(znet_weight_path, map_location=self.device))
 
 	def predict_image(self, image_path: str, save: bool = True):
-		from PIL import Image
-		img = Image.open(image_path).convert('L')
-		img_t = self.img_transform(img).unsqueeze(0).to(self.device)  # [1,1,H,W]
-		pred, prob = self._infer_tensor(img_t)
-		color_pred = label_to_color(pred)
-		# 原图（已经标准化过，反标准化显示）
-		vis_img = img_t[0, 0].cpu().numpy()
-		vis_img = (vis_img * 0.5 + 0.5)  # 反 Normalize 回 [0,1]
-		overlay = self._blend_overlay(vis_img, color_pred)
-		fig = self._plot_triplet(vis_img, color_pred, overlay,
-		                         os.path.basename(image_path))
+		if image_path.endswith(('.png', '.jpg', '.jpeg')):
+			print("Loading image from:", image_path)
+			image = Image.open(image_path).convert('L')
+			image = self.transform_image(image).unsqueeze(0).to(self.device)  # [1, 1, H, W]
+		if image_path.endswith('.npy'):
+			print("Loading numpy array from:", image_path)
+			image = np.load(image_path)
+			image = Image.fromarray((image * 255).astype(np.uint8))
+			image = self.transform_image(image).unsqueeze(0).to(self.device)  # [1, 1, H, W]
+
+		with torch.no_grad():
+			features = self.unet(image)
+			# 保持与训练一致：标准化特征，避免分布偏移
+			features = standardize_features(features)
+			post = self.z_net(features)
+			pred = torch.argmax(post, dim=1).detach().cpu().numpy()[0]
+			print(pred.shape, pred.min(), pred.max())
+		
+		fig, axes = plt.subplots(1, 3, figsize=(10, 5))
+		axes[0].imshow(image.squeeze().cpu().numpy(), cmap='gray')
+		axes[0].set_title("Input Image")
+		axes[0].axis('off')
+
+		axes[1].imshow(pred, cmap='gray')
+		axes[1].set_title("Model Output")
+		axes[1].axis('off')
+
+		axes[2].imshow(image.squeeze().cpu().numpy(), cmap='gray')
+		axes[2].imshow(pred, cmap='jet', alpha=0.4)  # 彩色mask，透明度0.4
+		axes[2].set_title("Overlay")
+		axes[2].axis('off')
+
+		fig.tight_layout()  # 新增，防止标题被遮挡
+		# 先保存，再阻塞显示，避免窗口一闪而过
 		if save:
-			os.makedirs('results', exist_ok=True)
-			out_path = os.path.join(
-			    'results', f"pred_{os.path.splitext(os.path.basename(image_path))[0]}.png")
+			os.makedirs(self.config.RESULTS_DIR, exist_ok=True)
+			# 使用支持的图像扩展名保存（统一为 .png），避免 .npy 等不被后端支持
+			base_name = os.path.splitext(os.path.basename(image_path))[0]
+			out_path = os.path.join(self.config.RESULTS_DIR, f"{base_name}.png")
 			fig.savefig(out_path, dpi=150, bbox_inches='tight')
-			plt.close(fig)
-			return out_path
-		return fig
+			print(f"Saved prediction to {out_path}")
+		plt.show()
+
 
 	def predict_folder(self, folder_path: str):
-		exts = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
-		files = [f for f in os.listdir(folder_path) if os.path.splitext(f)[
-		                               1].lower() in exts]
-		outputs = []
-		for f in files:
-			try:
-				path = os.path.join(folder_path, f)
-				out = self.predict_image(path, save=True)
-				outputs.append(out)
-			except Exception:
-				continue
-		return outputs
+		pass
 
-	@staticmethod
-	def _blend_overlay(gray_img: np.ndarray, color_mask: np.ndarray, alpha: float = 0.5):
-		g = np.stack([gray_img]*3, axis=-1)
-		g = (g * 255).astype(np.uint8)
-		blended = (alpha * color_mask + (1-alpha) * g).astype(np.uint8)
-		return blended
-
-	@staticmethod
-	def _plot_triplet(gray_img: np.ndarray, color_pred: np.ndarray, overlay: np.ndarray, title: str):
-		fig, axes = plt.subplots(1, 3, figsize=(9, 3))
-		axes[0].imshow(gray_img, cmap='gray'); axes[0].set_title(
-		    'Image'); axes[0].axis('off')
-		axes[1].imshow(color_pred); axes[1].set_title(
-		    'Segmentation'); axes[1].axis('off')
-		axes[2].imshow(overlay); axes[2].set_title('Overlay'); axes[2].axis('off')
-		fig.suptitle(title)
-		fig.tight_layout()
-		return fig
 
 
 if __name__ == '__main__':

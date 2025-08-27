@@ -1,307 +1,92 @@
 import os
 import torch
 from torch.utils.data import Dataset
-import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
-from data.transform import random_affine_params, apply_affine_transform
+from config import Config
+from data.transform import center_crop_image_label, center_crop_prior_4chs
 
 
-def compute_prior(label, gmm_num=4, img_size=128):
-    """计算狄利克雷先验参数（修正版本）"""
-    prior = np.zeros((gmm_num, img_size, img_size), dtype=np.float32)
-    cls_map = {0:0, 1:85, 2:170, 3:255}
-    
-    # 生成二值掩码
-    for k in range(gmm_num):
-        prior[k] = (label.squeeze().cpu().numpy() == cls_map[k]).astype(np.float32)
-    
-    # 计算每个类别的像素统计
-    pixel_counts = np.sum(prior, axis=(1, 2), keepdims=True)
-    total_pixels = np.sum(pixel_counts)
-    
-    # 转换为狄利克雷浓度参数
-    base_concentration = 2.0  # 基础浓度
-    max_concentration = 8.0   # 最大浓度
-    
-    for k in range(gmm_num):
-        if pixel_counts[k] > 0:
-            # 根据像素比例调整浓度参数
-            ratio = pixel_counts[k] / total_pixels
-            concentration = base_concentration + ratio * (max_concentration - base_concentration)
-            prior[k] = prior[k] * concentration + base_concentration
-        else:
-            # 不存在的类别设置较小的先验浓度
-            prior[k] = np.full_like(prior[k], base_concentration * 0.5)
-    
-    # 确保参数在合理范围
-    prior = np.clip(prior, a_min=0.5, a_max=10.0)
-    return torch.tensor(prior, dtype=torch.float32)
 
 
 # 定义数据集ACDCDataset
 class ACDCDataset(Dataset):
-    """
-    自定义数据集类, 用于读取 ACDC 数据集中的 frameXX 和其 _gt 标签。
-    """
-    def __init__(self, root_dir, phase='training', transform_image=None, transform_label=None, img_size=128, gmm_num=4):
-        """
-        Args:
-            root_dir (str): 数据集的根目录路径。
-            phase (str): 'training' 或 'testing', 选择训练或测试集。
-            transform (callable, optional): 图像和标签的可选变换。
-        """
-        self.img_size = img_size
-        self.gmm_num = gmm_num
+    def __init__(self, phase='train', transform_image=None, transform_label=None, config: Config=Config()):
+        self.root_dir = os.path.join(config.DATASET_DIR, config.DATASET)
+        self.config = config
+        self.img_size = config.IMG_SIZE
+        self.gmm_num = config.GMM_NUM
         self.transform_image = transform_image
         self.transform_label = transform_label
         self.images = []
         self.labels = []
 
-        phase_path = os.path.join(root_dir, phase)
-        patients = [entry for entry in os.scandir(phase_path) if entry.is_dir()]
-        for patient in patients:
-            cfg_path = os.path.join(patient.path, "Info.cfg")
-            if not os.path.exists(cfg_path):
-                print(f"Warning: Info.cfg not found for patient {patient.name}")
-                continue
-                
-            try:
-                with open(cfg_path, "r") as cfg:
-                    lines = cfg.readlines()
-                ED = lines[0].split(":")[1].strip()
-                ES = lines[1].split(":")[1].strip()
-            except (IndexError, ValueError) as e:
-                print(f"Warning: Error parsing Info.cfg for patient {patient.name}: {e}")
-                continue 
-            for entry in os.scandir(patient.path):
-                if not entry.is_dir() or "4d" in entry.name:
-                    continue
-                frame = entry.name.split("_")[1][-2:]
-                frame = "ED" if int(frame) == int(ED) else "ES"
-                slice_num = sum(1 for file in os.listdir(entry.path) if file.endswith(".png"))
-                for slice, file in enumerate(os.listdir(entry.path)):
-                    if not file.endswith(".png"):
-                        continue
-                    file_path = os.path.join(entry.path, file)
-                    if "gt" not in entry.name:
-                        self.images.append({
-                            "patient": patient.name,
-                            "frame": frame,
-                            "slice": slice,
-                            "slice_num": slice_num,
-                            "path": file_path,
-                        })
-                    elif "gt" in entry.name:
-                        self.labels.append({
-                            "patient": patient.name,
-                            "frame": frame,
-                            "slice": slice,
-                            "slice_num": slice_num,
-                            "path": file_path,
-                        })
+        group_path = [entry for entry in os.scandir(self.root_dir) if entry.is_dir()]
+        for gp in group_path:
+            for frame_path in os.scandir(gp):
+                prior_path = os.path.join(frame_path.path, f'prior_{self.gmm_num}chs.npy')
+                phase_image_path = os.path.join(frame_path.path, f'{phase}_image', 'slices')
+                phase_label_path = os.path.join(frame_path.path, f'{phase}_label', 'slices')
+                for image_file in os.scandir(phase_image_path):
+                    if not image_file.name.endswith('.npy'): continue
+                    slice_id = int(image_file.name.split('_')[-1].split('.')[0])
+                    self.images.append({
+                        'path': image_file.path,
+                        'slice_id': slice_id,
+                        'prior_path': prior_path,
+                    })
+                for label_file in os.scandir(phase_label_path):
+                    if not label_file.name.endswith('.npy'): continue
+                    slice_id = int(label_file.name.split('_')[-1].split('.')[0])
+                    self.labels.append({
+                        'path': label_file.path,
+                        'slice_id': slice_id,
+                        'prior_path': prior_path,
+                    })
 
-
-        # 确保图像和标签数量一致
-        assert len(self.images) == len(self.labels), "Number of images and labels do not match."
-        # print(f"ACDCDataset ({phase}) loaded: {len(self.images)} samples")
+        self.images.sort(key=lambda x: x['path'])
+        self.labels.sort(key=lambda x: x['path'])
+        assert len(self.images) == len(self.labels), "Number of images and labels do not match"
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        try:
-            image = self.transform_image(Image.open(self.images[idx]["path"]).convert('L'))  # [C, H, W]
-            label = self.transform_label(Image.open(self.labels[idx]["path"]).convert('L'))  # [C, H, W]
-        except Exception as e:
-            print(f"Error loading image/label at index {idx}: {e}")
-            print(f"Image path: {self.images[idx]['path']}")
-            print(f"Label path: {self.labels[idx]['path']}")
-            raise
-        prior = np.zeros((self.gmm_num, self.img_size, self.img_size), dtype=np.float32) # [4, H, W]
-        cls_map = {0:0, 1:85, 2:170, 3:255}
-        for k in range(self.gmm_num):
-            prior[k] = (label.squeeze().cpu().numpy() == cls_map[k]).astype(np.float32)
-        
-        # 修正：将概率转换为合适的狄利克雷参数
-        # 方法1: 基于像素比例生成浓度参数
-        prior = np.clip(prior, a_min=1e-8, a_max=None)
-        pixel_counts = np.sum(prior, axis=(1, 2), keepdims=True)  # 每个类别的像素数
-        total_pixels = np.sum(pixel_counts)
-        
-        # 将像素比例转换为狄利克雷浓度参数（推荐范围：1-10）
-        base_concentration = 2.0  # 基础浓度
-        max_concentration = 8.0   # 最大浓度
-        
-        for k in range(self.gmm_num):
-            if pixel_counts[k] > 0:
-                # 根据该类别的像素比例调整浓度
-                ratio = pixel_counts[k] / total_pixels
-                concentration = base_concentration + ratio * (max_concentration - base_concentration)
-                prior[k] = prior[k] * concentration + base_concentration
-            else:
-                # 对于不存在的类别，设置较小的浓度参数
-                prior[k] = np.full_like(prior[k], base_concentration * 0.5)
-        
-        # 确保所有参数都在合理范围内
-        prior = np.clip(prior, a_min=0.5, a_max=10.0)
-        prior = torch.tensor(prior, dtype=torch.float32) # [4, H, W]
+        slice_id = self.images[idx]['slice_id']
+        image = np.load(self.images[idx]['path'])
+        label = np.load(self.labels[idx]['path'])
+        image = Image.fromarray((image * 255).astype(np.uint8))
+        label = Image.fromarray(label.astype(np.uint8))
 
+        # 使用基于左心室中心的裁剪策略
+        image, label = center_crop_image_label(image, label, self.img_size)
+        
+        if self.transform_image:
+            image = self.transform_image(image) # [C, H, W]
+        if self.transform_label:
+            label = self.transform_label(label) # [C, H, W]
+
+        # 直接读取数据集中的prior
+        slice_id = min(slice_id, 9) # 限制slice_id在[0, 9]范围内
+        prior = np.load(self.images[idx]['prior_path'])[slice_id]
+        prior = center_crop_prior_4chs(prior, self.img_size)
+        prior = np.clip(prior, a_min=1e-6, a_max=1.0)
+        prior = torch.tensor(prior, dtype=torch.float32) # (gmm_num, H, W)
+
+        # 根据label动态生成prior
+        # prior = np.zeros((self.gmm_num, self.img_size, self.img_size), dtype=np.float32)
+        # label_np = label.squeeze().detach().cpu().numpy()
+        # for k in range(self.gmm_num):
+        #     prior[k] = (label_np == k).astype(np.float32)
+        # prior = np.clip(prior, a_min=1e-6, a_max=1.0)
+        # prior = torch.tensor(prior, dtype=torch.float32)
+        
         return {
-            "image": {
-                "patient": self.images[idx]["patient"],
-                "frame": self.images[idx]["frame"],
-                "slice": self.images[idx]["slice"],
-                "slice_num": self.images[idx]["slice_num"],
-                "data": image,  # [C, H, W]
-            },
-            "label": {
-                "patient": self.labels[idx]["patient"],
-                "frame": self.labels[idx]["frame"],
-                "slice": self.labels[idx]["slice"],
-                "slice_num": self.labels[idx]["slice_num"],
-                "data": label,  # [C, H, W]
-            },
-            "prior": {
-                "data": prior,  # [4, H, W]
-            },
+            "image": image,
+            "label": label,
+            "prior": prior,
         }
     
-
-
-
-# 先验数据集
-class PriorDataset(Dataset):
-    def __init__(self, root_dir, transform_image=None, transform_label=None, gmm_num=4, slice_num=10, img_size=128):
-        self.gmm_num = gmm_num
-        self.slice_num = slice_num
-        self.img_size = img_size
-        self.transform_image = transform_image
-        self.transform_label = transform_label
         
-        self.images = []
-        self.labels = []
-        patients = [entry for entry in os.scandir(root_dir) if entry.is_dir()]
-        for patient in patients:
-            for frame in os.scandir(patient.path):
-                img_dir = os.path.join(frame.path, "img")
-                seg_dir = os.path.join(frame.path, "seg")
-                if not os.path.exists(img_dir) or not os.path.exists(seg_dir):
-                    continue
-                img_files = sorted([file for file in os.listdir(img_dir) if file.endswith(".png")])
-                seg_files = sorted([file for file in os.listdir(seg_dir) if file.endswith(".png")])
-                
-                # 确保图像和标签文件数量一致
-                if len(img_files) != len(seg_files):
-                    print(f"Warning: Mismatch in {patient.name}/{frame.name} - {len(img_files)} images vs {len(seg_files)} labels")
-                    continue
-                    
-                for slice, (img_file, seg_file) in enumerate(zip(img_files, seg_files)):
-                    img_path = os.path.join(img_dir, img_file)
-                    seg_path = os.path.join(seg_dir, seg_file)
-                    self.images.append({
-                        "patient": patient.name,
-                        "frame": frame.name,
-                        "slice": slice,
-                        "path": img_path,
-                    })
-                    self.labels.append({
-                        "patient": patient.name,
-                        "frame": frame.name,
-                        "slice": slice,
-                        "path": seg_path,
-                    })
-                    
-        # 确保图像和标签数量一致
-        assert len(self.images) == len(self.labels), f"Number of images ({len(self.images)}) and labels ({len(self.labels)}) do not match."
-        print(f"PriorDataset loaded: {len(self.images)} samples")
-                    
-
-    def __len__(self):
-        return len(self.images)
-
-
-    def __getitem__(self, idx):
-        try:
-            image = self.transform_image(Image.open(self.images[idx]["path"]).convert('L'))  # [C, H, W]
-            label = self.transform_label(Image.open(self.labels[idx]["path"]).convert('L'))  # [C, H, W]
-        except Exception as e:
-            print(f"Error loading image/label at index {idx} in PriorDataset: {e}")
-            print(f"Image path: {self.images[idx]['path']}")
-            print(f"Label path: {self.labels[idx]['path']}")
-            raise
-            
-        prior = compute_prior(label, self.gmm_num, self.img_size)
-
-        return {
-            "image": {
-                "patient": self.images[idx]["patient"],
-                "frame": self.images[idx]["frame"],
-                "slice": self.images[idx]["slice"],
-                "data": image,  # [C, H, W]
-            },
-            "label": {
-                "patient": self.labels[idx]["patient"],
-                "frame": self.labels[idx]["frame"],
-                "slice": self.labels[idx]["slice"],
-                "data": label,  # [C, H, W]
-            },
-            "prior": {
-                "data": prior,  # [4, H, W]
-            },
-        }
-
-
-
-
-# 配准数据集
-class RRDataset(Dataset):
-    def __init__(self, root_dir, phase='training', transform_image=None, transform_label=None, img_size=128, gmm_num=4):
-        self.img_size = img_size
-        self.gmm_num = gmm_num
-        self.transform_image = transform_image
-        self.transform_label = transform_label
-        self.file_paths = []
-
-        phase_path = os.path.join(root_dir, phase)
-        patients = [entry for entry in os.scandir(phase_path) if entry.is_dir()]
-        for patient in patients:
-            for entry in os.scandir(patient.path):
-                if not entry.is_dir() or "4d" in entry.name or "gt" not in entry.name:
-                    continue
-                for file in os.listdir(entry.path):
-                    if not file.endswith(".png"):
-                        continue
-                    file_path = os.path.join(entry.path, file)
-                    self.file_paths.append(file_path)
-
-
-    def __len__(self):
-        return len(self.file_paths)
-
-    def __getitem__(self, idx):
-        file_path = self.file_paths[idx]
-        obj = Image.open(file_path).convert('L')
-        label = self.transform_label(obj) # [C, H, W]
-        label_01 = label / 255.0 # [C, H, W]
-        
-        prior = compute_prior(label, self.gmm_num, self.img_size)
-        
-
-        # 生成随机的刚性变换参数
-        # fixed = label_01.clone()  # [1, H, W]
-        fixed = prior.clone()  # [4, H, W]
-        scale, tx, ty = random_affine_params(scale_range=(0.2, 5.0), shift_range=(-20, 20))
-        moving = apply_affine_transform(fixed.unsqueeze(0), scale, tx, ty).squeeze(0)  # [C, H, W]
-        input_tensor = torch.cat((fixed, moving), dim=0)  # 将固定图像和移动图像拼接在一起
-        affine_param = torch.tensor([scale, tx, ty], dtype=torch.float32)  # [3]
-
-        return {
-            "fixed_moving": input_tensor,  # [C*2, H, W]
-            "affine_param": affine_param,  # [3]
-            "label": label_01,  # [C, H, W]
-            "prior": prior,  # [4, H, W]
-        }
 
 

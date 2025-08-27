@@ -99,7 +99,7 @@ class GmmLoss(nn.Module):
         self.k = config.GMM_NUM
         self.config = config
 
-    def forward(self, input, mu, var, pi, d, d0, epoch=None, total_epochs=None):
+    def forward(self, input, mu, var, pi, alpha, prior, epoch, total_epochs):
 
         B, C, H, W = input.shape
         x = input.unsqueeze(1)  # [B, 1, C, H, W]
@@ -108,8 +108,8 @@ class GmmLoss(nn.Module):
         mu  = mu.reshape(B, self.k, C, H, W)
         var = var.reshape(B, self.k, C, H, W)
         pi  = pi.reshape(B, self.k, H, W)
-        d   = d.reshape(B, self.k, H, W)
-        d0  = d0.reshape(B, self.k, H, W)
+        alpha   = alpha.reshape(B, self.k, H, W)
+        prior  = prior.reshape(B, self.k, H, W)
 
         # ----------------------
         # 1) Reconstruction term: -E_q(z|x) [ log N(x|mu,var) ]
@@ -117,74 +117,62 @@ class GmmLoss(nn.Module):
 
         # ----------------------
         # 2) KL(q(z|x) || p(z|Ω))
-        kl_z_loss = kl_categorical_loss(pi, d)
+        kl_z_loss = kl_categorical_loss(pi, alpha)
         
         # ----------------------
-        # 3) KL(Dir(d) || Dir(d0)), exact closed form
-        kl_o_loss = kl_dirichlet_loss(d, d0)
+        # 3) KL(Dir(alpha) || Dir(prior)), exact closed form
+        kl_o_loss = kl_dirichlet_loss(alpha, prior)
 
-        # dynamic weights
+
         weight_1 = 1.0
-        weight_2 = 1.0
-        # 前 20% epoch 保持 1.0，之后线性衰减到 0.01
-        if epoch is not None and total_epochs is not None and total_epochs > 0:
-            hold_ratio = 0.2
-            min_w = 0.01
-            p = max(0.0, min(1.0, epoch / max(1, total_epochs - 1)))
-            if p <= hold_ratio:
-                weight_3 = 1.0
-            else:
-                t = (p - hold_ratio) / (1 - hold_ratio)
-                weight_3 = 1.0 + (min_w - 1.0) * t  # 线性插值到 min_w
-        else:
-            weight_3 = 0.5
+        weight_2 = 0.1
+        weight_3 = 1.0
+        
+        if epoch > 0.1 * total_epochs:
+            weight_2 = 0.1 + 0.9 * ((epoch + 1) / total_epochs)
+            weight_3 = 1.0 - 0.99 * ((epoch + 1) / total_epochs)
+
 
         loss_1 = recon_loss * weight_1
-        loss_2 = kl_z_loss * weight_2
-        loss_3 = kl_o_loss * weight_3
+        loss_2 = kl_z_loss  * weight_2
+        loss_3 = kl_o_loss  * weight_3
 
-        loss_mse = nn.MSELoss()(d, d0) * 0.0
+        loss_mse = nn.MSELoss()(alpha, prior) * 0.0
 
         # π 熵奖励 (提高组件可塑性) H = -Σ π log π; 负号取反加入总 loss (max H => min -H)
-        with torch.no_grad():
-            _safe_pi = torch.clamp(pi, 1e-8, 1.0)
-        entropy = -torch.sum(pi * torch.log(_safe_pi), dim=1).mean()  # 平均像素熵
-        lambda_entropy = float(getattr(self.config, 'PI_ENTROPY_WEIGHT', 1e-3))
-        loss_entropy = -lambda_entropy * entropy  # 想鼓励高熵 => 减去熵
-        # 暴露给外部 (例如 tensorboard) 使用
-        self.last_entropy = float(entropy.detach().item())
+        # with torch.no_grad():
+        #     _safe_pi = torch.clamp(pi, 1e-8, 1.0)
+        # entropy = -torch.sum(pi * torch.log(_safe_pi), dim=1).mean()  # 平均像素熵
+        # lambda_entropy = float(getattr(self.config, 'PI_ENTROPY_WEIGHT', 1e-3))
+        # loss_entropy = -lambda_entropy * entropy  # 想鼓励高熵 => 减去熵
+        # self.last_entropy = float(entropy.detach().item())
 
         # ---- 方差中部拉升正则 (防止全部贴下界) ----
-        beta_mid = float(getattr(self.config, 'VAR_MID_BETA', 0.0))
-        if beta_mid > 0.0:
-            # 计算 var 均值(忽略 batch / k / c / 空间区分按整体)
-            var_mean = var.mean()
-            var_mid_target = 0.5 * (self.config.VAR_MIN + self.config.VAR_MAX)
-            # 仅当低于目标时施加惩罚: ReLU(mid - mean)
-            var_mid_penalty = torch.relu(var_mid_target - var_mean)
-            loss_var_mid = beta_mid * var_mid_penalty
-        else:
-            loss_var_mid = torch.tensor(0.0, device=total_loss.device if 'total_loss' in locals() else var.device)
-        self.last_var_mean = float(var.mean().detach().item())
-        self.last_var_mid_penalty = float(loss_var_mid.detach().item())
+        # beta_mid = float(getattr(self.config, 'VAR_MID_BETA', 0.0))
+        # if beta_mid > 0.0:
+        #     var_mean = var.mean()
+        #     var_mid_target = 0.5 * (self.config.VAR_MIN + self.config.VAR_MAX)
+        #     var_mid_penalty = torch.relu(var_mid_target - var_mean)
+        #     loss_var_mid = beta_mid * var_mid_penalty
+        # else:
+        #     loss_var_mid = torch.tensor(0.0, device=total_loss.device if 'total_loss' in locals() else var.device)
+        # self.last_var_mean = float(var.mean().detach().item())
+        # self.last_var_mid_penalty = float(loss_var_mid.detach().item())
 
-        total_loss = loss_1 + loss_2 + loss_3 + loss_mse + loss_entropy + loss_var_mid
+        total_loss = loss_1 + loss_2 + loss_3 + loss_mse
+        # total_loss += loss_entropy + loss_var_mid
 
-        if not torch.isfinite(total_loss):
-            print("Warning: total_loss has NaN/Inf.")
 
         # 字典返回形式
         return {
             'total': total_loss,
             'recon': loss_1,
             'kl_pi': loss_2,          # KL(q(z|x) || p(z|Ω))
-            'kl_dir': loss_3,         # KL(Dir(d) || Dir(d0))，已乘以动态权重
+            'kl_dir': loss_3,         # KL(Dir(alpha) || Dir(prior))，已乘以动态权重
             'loss_mse': loss_mse,
-            'w_dir': weight_3,
-            'pi': pi,                 # 变分后验概率π_{ik} (按loss.md定义)
-            'entropy': entropy.detach(),
-            'loss_var_mid': loss_var_mid.detach(),
-    }
+            'weight_2': weight_2,
+            'weight_3': weight_3,
+        }
 
 
 

@@ -4,15 +4,15 @@ from dataclasses import dataclass
 
 @dataclass
 class Config:
-    DATASET: str = "ACDC"
+    DATASET: str = "ACDC_aligned"
     DATASET_DIR: str = "D:/Users/pyw/Desktop/Dataset"
     BATCH_SIZE: int = 16
     EPOCHS: int = 100
     LEARNING_RATE: float = 5e-4
     NUM_WORKERS: int = 8
     BEST_LOSS: float = float('inf')
-    BEST_DICE: float = 0.4
-    BEST_IOU: float = 0.4
+    BEST_DICE: float = 0.5
+    BEST_IOU: float = 0.5
     BEST_PIXEL_ERROR: float = float('inf')
     DEVICE: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     CHECKPOINTS_DIR: str = './checkpoints'
@@ -24,11 +24,10 @@ class Config:
     CLASS_NUM: int = 4
     GMM_NUM: int = 4
     SCALE_RANGE: tuple = (0.5, 2.0)
-    SHIFT_RANGE: tuple = (-10, 10)
+    SHIFT_RANGE: tuple = (-20, 20)
     # Registration application epoch threshold
-    REG_START_EPOCH: int = 10
+    REG_START_EPOCH: int = 5
     # ---- New hyper params for improved normalization & GMM stability ----
-    FEATURE_NORM: str = "instance"          # choices: instance|channel|none
     MU_RANGE: float = 3.0                    # clamp mu to [-MU_RANGE, MU_RANGE]
     VAR_MIN: float = 1e-1                    # minimum variance
     VAR_MAX: float = 2.25                    # maximum variance
@@ -72,8 +71,6 @@ def get_config():
     parser.add_argument('--scale_range', nargs=2, type=float, default=Config.SCALE_RANGE)
     parser.add_argument('--shift_range', nargs=2, type=int, default=Config.SHIFT_RANGE)
     parser.add_argument('--reg_start_epoch', type=int, default=Config.REG_START_EPOCH)
-    parser.add_argument('--feature_norm', type=str, default=Config.FEATURE_NORM,
-                        choices=['instance','channel','none'])
     parser.add_argument('--mu_range', type=float, default=Config.MU_RANGE)
     parser.add_argument('--var_min', type=float, default=Config.VAR_MIN)
     parser.add_argument('--var_max', type=float, default=Config.VAR_MAX)
@@ -115,16 +112,15 @@ def get_config():
         SCALE_RANGE=tuple(args.scale_range),
         SHIFT_RANGE=tuple(args.shift_range),
         REG_START_EPOCH=args.reg_start_epoch,
-        FEATURE_NORM=args.feature_norm,
         MU_RANGE=args.mu_range,
         VAR_MIN=args.var_min,
         VAR_MAX=args.var_max,
         PI_TEMPERATURE=args.pi_temperature,
-    VAR_TEMP=args.var_temp,
-    VAR_MID_BETA=args.var_mid_beta,
+        VAR_TEMP=args.var_temp,
+        VAR_MID_BETA=args.var_mid_beta,
         PRIOR_BASE_CONC=args.prior_base_conc,
         PRIOR_MAX_CONC=args.prior_max_conc,
-    PI_ENTROPY_WEIGHT=args.pi_entropy_weight,
+        PI_ENTROPY_WEIGHT=args.pi_entropy_weight,
         WARMUP_EPOCHS=args.warmup_epochs,
         WARMUP_START_FACTOR=args.warmup_start_factor,
         PREDICT_IMAGE=args.predict_image,
