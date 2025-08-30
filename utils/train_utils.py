@@ -103,7 +103,7 @@ def compute_dirichlet_priors(alpha, prior, reg_net, config: Config, epoch):
         ty_pred = torch.clamp(affine_output[:, 2], config.SHIFT_RANGE[0], config.SHIFT_RANGE[1])
 
         # 仅在指定 epoch 之后应用配准形变
-    reg_start = getattr(config, 'REG_START_EPOCH', 10)
+    reg_start = getattr(config, 'REG_START_EPOCH', 5)
     if epoch >= reg_start:
         affined_prior = apply_affine_transform(prior, scale_pred, tx_pred, ty_pred)
     else:

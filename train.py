@@ -10,6 +10,7 @@ from utils.train_utils import forward_pass
 from utils.visualizer import create_visualization
 from utils.metrics import dice_coefficient, iou_score, pixel_error
 from utils.dataloader import get_loaders
+from utils.train_utils import standardize_features
 from models.unet import UNet
 from models.regnet import RR_ResNet
 from config import Config, get_config
@@ -25,7 +26,7 @@ class Trainer:
         self.config = config
         self.logger = logging.getLogger("Train GMM Segmentation")
 
-    def setup(self):
+    def setup(self, train=True):
         # 设置日志记录器
         self.logger.setLevel(logging.INFO)
         # 创建控制台处理器
@@ -45,7 +46,10 @@ class Trainer:
         self.logger.info(f"Using configuration: {self.config}")
 
         # 加载数据集
-        self.train_loader, self.valid_loader = get_loaders(self.config)
+        self.train_loader, self.valid_loader, self.test_loader = get_loaders(self.config)
+        self.logger.info(f"Train samples: {len(self.train_loader.dataset)}")
+        self.logger.info(f"Valid samples: {len(self.valid_loader.dataset)}")
+        self.logger.info(f"Test  samples: {len(self.test_loader.dataset)}")
 
         # 定义模型
         self.unet = UNet(self.config.IN_CHANNELS, self.config.FEATURE_NUM).to(self.config.DEVICE)  # UNet 用于提取特征
@@ -92,8 +96,6 @@ class Trainer:
 
         except Exception as e:
             self.logger.error(f"加载预训练权重时出错: {e}")
-        else:
-            self.logger.info("✅预训练权重加载完成.")
 
         # 定义损失函数和优化器
         self.criterion = GmmLoss(config=self.config).to(self.config.DEVICE)
@@ -116,21 +118,21 @@ class Trainer:
         # Warmup 基础学习率缓存
         self.base_lrs = [g['lr'] for g in self.optimizer.param_groups]
 
-        # 创建日志记录器
-        log_dir = os.path.join(self.config.LOGS_DIR, "tensorboard", self.time_str)
-        os.makedirs(log_dir, exist_ok=True)
-        self.writer = SummaryWriter(log_dir)
+        if train:
+            # 创建日志记录器
+            log_dir = os.path.join(self.config.LOGS_DIR, "tensorboard", self.time_str)
+            os.makedirs(log_dir, exist_ok=True)
+            self.writer = SummaryWriter(log_dir)
 
-        # 创建输出目录
-        self.output_dir = os.path.join(self.config.OUTPUT_DIR, self.time_str)
-        os.makedirs(self.output_dir, exist_ok=True)
+            # 创建输出目录
+            self.output_dir = os.path.join(self.config.OUTPUT_DIR, self.time_str)
+            os.makedirs(self.output_dir, exist_ok=True)
 
 
     def train_one_epoch(self, epoch, epsilon=1e-6):
         self.x_net.train()
         self.z_net.train()
         self.o_net.train()
-
 
         # 学习率 warmup（按 epoch 线性从 start_factor -> 1.0）
         if self.config.WARMUP_EPOCHS > 0 and epoch < self.config.WARMUP_EPOCHS:
@@ -332,10 +334,9 @@ class Trainer:
                 pred_cls = torch.argmax(pi, dim=1).detach().cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
 
-                dataset_name = os.path.basename(self.config.DATASET)
-                dice_total += dice_coefficient(pred_cls, label_np, self.config.GMM_NUM, dataset_name, background=True)
-                iou_total += iou_score(pred_cls, label_np, self.config.GMM_NUM, dataset_name, background=True)
-                pixel_err_total += pixel_error(pred_cls, label_np, self.config.GMM_NUM, dataset_name, background=True)
+                dice_total += dice_coefficient(pred_cls, label_np, self.config.GMM_NUM, background=True)
+                iou_total += iou_score(pred_cls, label_np, self.config.GMM_NUM, background=True)
+                pixel_err_total += pixel_error(pred_cls, label_np, self.config.GMM_NUM, background=True)
 
     
         self.valid_loss_1 = valid_loss_1 / len(self.valid_loader)
@@ -396,6 +397,35 @@ class Trainer:
             self.mu_stats_test = None
 
 
+    def test(self):
+        z_net_weights = torch.load("checkpoints/unet/z_best.pth", 
+                                    map_location=self.config.DEVICE, 
+                                    weights_only=True)
+        unet_weights = torch.load("checkpoints/unet/unet_best.pth", 
+                                    map_location=self.config.DEVICE, 
+                                    weights_only=True)
+        self.z_net.load_state_dict(z_net_weights)
+        self.unet.load_state_dict(unet_weights)
+        self.z_net.eval()
+        self.unet.eval()
+
+        test_dice = 0
+        with torch.no_grad():
+            for batch in tqdm(self.test_loader, desc=f"[test]", ncols=100):
+                image = batch['image'].to(self.config.DEVICE, dtype=torch.float32)
+                label = batch['label'].to(self.config.DEVICE, dtype=torch.float32)
+
+                img_4_chs = self.unet(image)
+                img_4_chs = standardize_features(img_4_chs)
+                post = self.z_net(img_4_chs)
+                pred = torch.argmax(post, dim=1).detach().cpu().numpy()
+                label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
+                test_dice += dice_coefficient(pred, label_np, self.config.GMM_NUM, background=True)
+
+        test_dice /= len(self.test_loader)
+        self.logger.info(f"[Test] Dice: {test_dice:.4f}")
+
+
     def print_log_info(self, epoch):
         if self.logger:
             self.logger.info(f"Epoch [{epoch+1}/{self.config.EPOCHS}]")
@@ -422,6 +452,8 @@ class Trainer:
                 f"IoU: {self.avg_iou:.4f}  "
                 f"Pixel Error: {self.avg_pixel_err:.4f}"
             )
+
+            self.logger.info(f"Current best dice: {self.config.BEST_DICE:.4f}")
 
             # 打印方差统计
             if getattr(self, 'var_stats_train', None):
@@ -455,6 +487,7 @@ class Trainer:
         os.makedirs(checkpoints_dir, exist_ok=True)
         if self.avg_dice > self.config.BEST_DICE:
             self.config.BEST_DICE = self.avg_dice
+            self.config.BEST_EPOCH = epoch + 1
             torch.save(self.x_net.state_dict(), os.path.join(checkpoints_dir, f"x_best.pth"))
             torch.save(self.z_net.state_dict(), os.path.join(checkpoints_dir, f"z_best.pth"))
             torch.save(self.o_net.state_dict(), os.path.join(checkpoints_dir, f"o_best.pth"))
@@ -477,19 +510,21 @@ class Trainer:
         )
 
     def add_tensorboard_scalars(self, epoch):
-        self.writer.add_scalars("Train", {
-            "loss1": self.train_loss_1, 
-            "loss2": self.train_loss_2, 
-            "loss3": self.train_loss_3, 
-            "total": self.avg_train_loss,
-            "weight_2": self.current_weight_2,
-            "weight_3": self.current_weight_3,
+        self.writer.add_scalars("loss1", {
+            "train": self.train_loss_1,
+            "valid": self.valid_loss_1
         }, epoch+1)
-        self.writer.add_scalars("Valid", {
-            "loss1": self.valid_loss_1, 
-            "loss2": self.valid_loss_2, 
-            "loss3": self.valid_loss_3, 
-            "total": self.avg_valid_loss
+        self.writer.add_scalars("loss2", {
+            "train": self.train_loss_2,
+            "valid": self.valid_loss_2
+        }, epoch+1)
+        self.writer.add_scalars("loss3", {
+            "train": self.train_loss_3,
+            "valid": self.valid_loss_3
+        }, epoch+1)
+        self.writer.add_scalars("loss_total", {
+            "train": self.avg_train_loss,
+            "valid": self.avg_valid_loss
         }, epoch+1)
         self.writer.add_scalars("Metrics", {
             "dice": self.avg_dice, 
@@ -502,26 +537,32 @@ class Trainer:
             self.writer.add_scalar("LR/current_group0", self.optimizer.param_groups[0]['lr'], epoch+1)
 
 
-    def cleanup(self):
-        self.writer.close()
+    def cleanup(self, train=True):
+        if train:
+            self.writer.close()
+            self.logger.info("Best model saved at epoch {}, with Dice: {:.4f}".format(self.config.BEST_EPOCH, self.config.BEST_DICE))
+            self.logger.info("✅Training completed.")
+        else:
+            self.logger.info("✅Testing completed.")
         self.logger.removeHandler(self.console_handler)
         self.logger.removeHandler(self.file_handler)
-        self.logger.info("✅Training completed.")
 
 
-    def run(self):
-        self.setup()
-        for epoch in range(self.config.EPOCHS):
-            self.train_one_epoch(epoch)
-            self.validate(epoch)
-            self.print_log_info(epoch)
-            # 只有在 warmup 完成后再使用调度器
-            if epoch >= self.config.WARMUP_EPOCHS:
-                self.scheduler.step(self.avg_valid_loss)
-            self.save_checkpoints(epoch)
-            self.visualize(epoch)
-            self.add_tensorboard_scalars(epoch)
-        self.cleanup()
+    def run(self, train=True):
+        self.setup(train=train)
+        if train:
+            for epoch in range(self.config.EPOCHS):
+                self.train_one_epoch(epoch)
+                self.validate(epoch)
+                self.print_log_info(epoch)
+                # 只有在 warmup 完成后再使用调度器
+                if epoch >= self.config.WARMUP_EPOCHS:
+                    self.scheduler.step(self.avg_valid_loss)
+                self.save_checkpoints(epoch)
+                self.visualize(epoch)
+                self.add_tensorboard_scalars(epoch)
+        self.test()
+        self.cleanup(train=train)
 
 
 
@@ -529,6 +570,6 @@ if __name__ == "__main__":
     # 获取配置
     config = get_config()
     trainer = Trainer(config)
-    trainer.run()
+    trainer.run(train=False)
 
     

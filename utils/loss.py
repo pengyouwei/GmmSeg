@@ -125,11 +125,10 @@ class GmmLoss(nn.Module):
 
 
         weight_1 = 1.0
-        weight_2 = 0.1
+        weight_2 = 1.0
         weight_3 = 1.0
         
         if epoch > 0.1 * total_epochs:
-            weight_2 = 0.1 + 0.9 * ((epoch + 1) / total_epochs)
             weight_3 = 1.0 - 0.99 * ((epoch + 1) / total_epochs)
 
 
@@ -139,28 +138,7 @@ class GmmLoss(nn.Module):
 
         loss_mse = nn.MSELoss()(alpha, prior) * 0.0
 
-        # π 熵奖励 (提高组件可塑性) H = -Σ π log π; 负号取反加入总 loss (max H => min -H)
-        # with torch.no_grad():
-        #     _safe_pi = torch.clamp(pi, 1e-8, 1.0)
-        # entropy = -torch.sum(pi * torch.log(_safe_pi), dim=1).mean()  # 平均像素熵
-        # lambda_entropy = float(getattr(self.config, 'PI_ENTROPY_WEIGHT', 1e-3))
-        # loss_entropy = -lambda_entropy * entropy  # 想鼓励高熵 => 减去熵
-        # self.last_entropy = float(entropy.detach().item())
-
-        # ---- 方差中部拉升正则 (防止全部贴下界) ----
-        # beta_mid = float(getattr(self.config, 'VAR_MID_BETA', 0.0))
-        # if beta_mid > 0.0:
-        #     var_mean = var.mean()
-        #     var_mid_target = 0.5 * (self.config.VAR_MIN + self.config.VAR_MAX)
-        #     var_mid_penalty = torch.relu(var_mid_target - var_mean)
-        #     loss_var_mid = beta_mid * var_mid_penalty
-        # else:
-        #     loss_var_mid = torch.tensor(0.0, device=total_loss.device if 'total_loss' in locals() else var.device)
-        # self.last_var_mean = float(var.mean().detach().item())
-        # self.last_var_mid_penalty = float(loss_var_mid.detach().item())
-
         total_loss = loss_1 + loss_2 + loss_3 + loss_mse
-        # total_loss += loss_entropy + loss_var_mid
 
 
         # 字典返回形式

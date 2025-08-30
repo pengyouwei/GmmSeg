@@ -11,9 +11,10 @@ class Config:
     LEARNING_RATE: float = 5e-4
     NUM_WORKERS: int = 8
     BEST_LOSS: float = float('inf')
-    BEST_DICE: float = 0.5
-    BEST_IOU: float = 0.5
+    BEST_DICE: float = 0.8
+    BEST_IOU: float = 0.8
     BEST_PIXEL_ERROR: float = float('inf')
+    BEST_EPOCH: int = -1
     DEVICE: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     CHECKPOINTS_DIR: str = './checkpoints'
     OUTPUT_DIR: str = './output' # Output directory for visualizations
@@ -25,8 +26,10 @@ class Config:
     GMM_NUM: int = 4
     SCALE_RANGE: tuple = (0.5, 2.0)
     SHIFT_RANGE: tuple = (-20, 20)
+
     # Registration application epoch threshold
     REG_START_EPOCH: int = 5
+
     # ---- New hyper params for improved normalization & GMM stability ----
     MU_RANGE: float = 3.0                    # clamp mu to [-MU_RANGE, MU_RANGE]
     VAR_MIN: float = 1e-1                    # minimum variance
@@ -34,17 +37,18 @@ class Config:
     PI_TEMPERATURE: float = 1.0              # temperature for softmax of pi
     VAR_TEMP: float = 2.0                    # 温度/缩放: 控制 var 原始输出进入 softplus 的平滑程度
     VAR_MID_BETA: float = 0.2                # 中位(均值)方差拉升正则权重
+
     # Prior probability -> concentration mapping
     PRIOR_BASE_CONC: float = 2.0             # base concentration after mapping
     PRIOR_MAX_CONC: float = 8.0              # max concentration after mapping
-    # ---- Regularization ----
-    PI_ENTROPY_WEIGHT: float = 1e-3          # π 熵正则权重 (鼓励高熵, 防止塌缩)
+
     # ---- Prediction options (no posterior mode now) ----
     PREDICT_IMAGE: str | None = None         # 单张预测图片路径
     PREDICT_DIR: str | None = None           # 批量预测目录
     PREDICT_SAVE_MASK: bool = True           # 保存彩色 mask
     PREDICT_SAVE_OVERLAY: bool = True        # 保存叠加图
     RESULTS_DIR: str = './results'           # 结果保存目录
+
     # ---- Warmup (learning rate) ----
     WARMUP_EPOCHS: int = 5                  # 前多少个 epoch 做学习率 warmup（0 表示关闭）
     WARMUP_START_FACTOR: float = 0.1        # 初始学习率 = base_lr * start_factor
@@ -79,7 +83,6 @@ def get_config():
     parser.add_argument('--var_mid_beta', type=float, default=Config.VAR_MID_BETA)
     parser.add_argument('--prior_base_conc', type=float, default=Config.PRIOR_BASE_CONC)
     parser.add_argument('--prior_max_conc', type=float, default=Config.PRIOR_MAX_CONC)
-    parser.add_argument('--pi_entropy_weight', type=float, default=Config.PI_ENTROPY_WEIGHT)
     parser.add_argument('--warmup_epochs', type=int, default=Config.WARMUP_EPOCHS)
     parser.add_argument('--warmup_start_factor', type=float, default=Config.WARMUP_START_FACTOR)
     # prediction related
@@ -120,7 +123,6 @@ def get_config():
         VAR_MID_BETA=args.var_mid_beta,
         PRIOR_BASE_CONC=args.prior_base_conc,
         PRIOR_MAX_CONC=args.prior_max_conc,
-        PI_ENTROPY_WEIGHT=args.pi_entropy_weight,
         WARMUP_EPOCHS=args.warmup_epochs,
         WARMUP_START_FACTOR=args.warmup_start_factor,
         PREDICT_IMAGE=args.predict_image,
@@ -133,6 +135,7 @@ def get_config():
         BEST_DICE=Config().BEST_DICE,
         BEST_IOU=Config().BEST_IOU,
         BEST_PIXEL_ERROR=Config.BEST_PIXEL_ERROR,
+        BEST_EPOCH=Config.BEST_EPOCH,
         DEVICE=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     )
 
