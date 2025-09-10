@@ -19,18 +19,27 @@ class Predictor:
 		self.device = config.DEVICE
 		self.transform_image = get_image_transform(config.IMG_SIZE)
 		self.unet = UNet(config.IN_CHANNELS, config.FEATURE_NUM).to(self.device)
-		self.z_net = UNet(config.FEATURE_NUM, config.GMM_NUM).to(self.device)
+		self.x_net = UNet(self.config.FEATURE_NUM, self.config.FEATURE_NUM * self.config.GMM_NUM * 2).to(self.config.DEVICE)  # mu, var
+		self.z_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # pi
+		self.o_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # d
 		self.load_weights()
 		self.unet.eval()
+		self.x_net.eval()
 		self.z_net.eval()
+		self.o_net.eval()
 
 	def load_weights(self):
 		unet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'unet_best.pth')
+		xnet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'x_best.pth')
 		znet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'z_best.pth')
+		onet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'o_best.pth')
 		self.unet.load_state_dict(torch.load(unet_weight_path, map_location=self.device))
+		self.x_net.load_state_dict(torch.load(xnet_weight_path, map_location=self.device))
 		self.z_net.load_state_dict(torch.load(znet_weight_path, map_location=self.device))
+		self.o_net.load_state_dict(torch.load(onet_weight_path, map_location=self.device))
+		print("Loaded model weights.")
 
-	def predict_image(self, image_path: str, save: bool = True):
+	def predict_img(self, image_path: str, save: bool = True):
 		if image_path.endswith(('.png', '.jpg', '.jpeg')):
 			print("Loading image from:", image_path)
 			image = Image.open(image_path).convert('L')
@@ -75,7 +84,7 @@ class Predictor:
 		plt.show()
 
 
-	def predict_folder(self, folder_path: str):
+	def predict_dir(self, folder_path: str):
 		pass
 
 
@@ -83,8 +92,8 @@ class Predictor:
 if __name__ == '__main__':
 	config = get_config()
 	predictor = Predictor(config)
-	if config.PREDICT_IMAGE:
-		predictor.predict_image(config.PREDICT_IMAGE)
+	if config.PREDICT_IMG:
+		predictor.predict_img(config.PREDICT_IMG)
 	if config.PREDICT_DIR:
-		predictor.predict_folder(config.PREDICT_DIR)
+		predictor.predict_dir(config.PREDICT_DIR)
 	print("Prediction completed.")

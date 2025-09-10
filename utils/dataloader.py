@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
-from data.dataset import ACDCDataset, MMDataset
+from data.dataset import ACDCDataset, MMDataset, SCDDataset
 from data.transform import get_image_transform, get_label_transform
 from config import Config
 import os
@@ -41,6 +41,19 @@ def get_loaders(config: Config):
                                   transform_image=image_transform, 
                                   transform_label=label_transform, 
                                   config=config)
+        case "SCD":
+            train_set = SCDDataset(phase="train", 
+                                   transform_image=image_transform, 
+                                   transform_label=label_transform, 
+                                   config=config)
+            valid_set = SCDDataset(phase="val", 
+                                   transform_image=image_transform, 
+                                   transform_label=label_transform, 
+                                   config=config)
+            test_set = SCDDataset(phase="test", 
+                                  transform_image=image_transform, 
+                                  transform_label=label_transform, 
+                                  config=config)
         case _:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -52,7 +65,7 @@ def get_loaders(config: Config):
                               drop_last=True)
     valid_loader = DataLoader(valid_set, 
                               batch_size=config.BATCH_SIZE, 
-                              shuffle=True,
+                              shuffle=False,
                               num_workers=config.NUM_WORKERS, 
                               pin_memory=True, 
                               drop_last=True)

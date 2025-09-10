@@ -32,8 +32,8 @@ def get_lv_centroid_from_prior(prior_array, lv_channel_idx=1):
     
     # 计算质心
     y_coords, x_coords = np.where(lv_mask)
-    center_y = int(np.mean(y_coords))
-    center_x = int(np.mean(x_coords))
+    center_y = round(np.mean(y_coords))
+    center_x = round(np.mean(x_coords))
 
     return center_y, center_x
 
@@ -108,9 +108,9 @@ def get_lv_centroid(label_array):
     
     # 计算质心
     y_coords, x_coords = np.where(lv_mask)
-    center_y = int(np.mean(y_coords))
-    center_x = int(np.mean(x_coords))
-    
+    center_y = round(np.mean(y_coords))
+    center_x = round(np.mean(x_coords))
+
     return center_y, center_x
 
 
@@ -190,7 +190,7 @@ class ConditionalResize(transforms.Resize):
 
 def get_image_transform(img_size):
     return transforms.Compose([
-        # ConditionalResize((img_size, img_size), img_size),
+        ConditionalResize((img_size, img_size), img_size),
         transforms.CenterCrop((img_size, img_size)), 
         transforms.ToTensor(),  # 转为张量，范围 [0, 1]
         transforms.Normalize(mean=[0.5], std=[0.5])  # 标准化到 [-1, 1]
@@ -198,7 +198,7 @@ def get_image_transform(img_size):
 
 def get_label_transform(img_size):
     return transforms.Compose([
-        # ConditionalResize((img_size, img_size), img_size),
+        ConditionalResize((img_size, img_size), img_size),
         transforms.CenterCrop((img_size, img_size)),
         transforms.PILToTensor()
     ])
@@ -226,3 +226,45 @@ def apply_affine_transform(img, scale, tx, ty, mode='bilinear', padding_mode='bo
     transformed_img = nn.functional.grid_sample(img, grid, mode=mode, padding_mode=padding_mode, align_corners=False)
     
     return transformed_img
+
+
+# 随机生成旋转角度（单位：弧度）
+def random_rotate_params(angle_range=(-30, 30)):
+    angle = random.uniform(*angle_range)  # 单位：度
+    rad = math.radians(angle)             # 转成弧度
+    return rad
+
+
+def apply_rotate_transform(img, angle, mode='bilinear', padding_mode='border'):
+    """对 batch 图像施加旋转 (可微)。
+    支持:
+        angle: float(标量弧度) | torch.Tensor 形状 [B] 或 [B,1]
+    要求: angle 为弧度。
+    """
+    img = img.float()  # 确保浮点数类型
+    B, C, H, W = img.shape
+
+    # 处理角度到 [B]
+    if not torch.is_tensor(angle):
+        angle = torch.tensor(angle, dtype=img.dtype, device=img.device).repeat(B)
+    else:
+        angle = angle.to(img.device, dtype=img.dtype)
+        if angle.dim() == 2 and angle.size(1) == 1:
+            angle = angle.squeeze(1)
+        if angle.dim() == 0:
+            angle = angle.repeat(B)
+        assert angle.shape[0] == B, f"angle batch size {angle.shape[0]} != image batch size {B}"
+
+    cos_a = torch.cos(angle)
+    sin_a = torch.sin(angle)
+
+    theta = torch.zeros(B, 2, 3, device=img.device, dtype=img.dtype)
+    theta[:, 0, 0] = cos_a
+    theta[:, 0, 1] = -sin_a
+    theta[:, 1, 0] = sin_a
+    theta[:, 1, 1] = cos_a
+
+    grid = F.affine_grid(theta, img.size(), align_corners=False)
+    rotated_img = F.grid_sample(img, grid, mode=mode, padding_mode=padding_mode, align_corners=False)
+
+    return rotated_img

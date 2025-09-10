@@ -6,8 +6,6 @@ from config import Config
 
 def create_visualization(image_show,        # [H, W]
                          label_show,        # [H, W]
-                         mu_show,           # [K*C, H, W]
-                         var_show,          # [K*C, H, W]
                          pi_show,           # [K, H, W]
                          d1_show,           # [K, H, W]
                          d0_show,           # [K, H, W]
@@ -52,5 +50,5 @@ def create_visualization(image_show,        # [H, W]
         axes[2, i].axis('off')
         axes[3, i].axis('off')
 
-    fig.savefig(os.path.join(output_dir, f"vis_epoch_{epoch}.png"), dpi=150, bbox_inches='tight')
+    fig.savefig(os.path.join(output_dir, f"vis_epoch_{epoch+1}.png"), dpi=150, bbox_inches='tight')
     plt.close(fig)

@@ -69,7 +69,7 @@ $$
 ELBO 定义：
 
 $$
-	ext{ELBO} = \mathbb{E}_{q} [\log P(x \mid z, \Omega)] - \mathrm{KL}\big(q(z,\Omega \mid x)\;\Vert\; P(z,\Omega)\big)
+\text{ELBO} = \mathbb{E}_{q} [\log P(x \mid z, \Omega)] - \mathrm{KL}\big(q(z,\Omega \mid x)\;\Vert\; P(z,\Omega)\big)
 $$
 
 最小化负 ELBO：
