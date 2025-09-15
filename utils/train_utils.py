@@ -95,7 +95,7 @@ def compute_dirichlet_priors(alpha, prior, reg_net, config: Config, epoch):
 
     # 使用配准网络
     reg_net.eval()  # 设置为评估模式
-    reg_input = torch.cat((prior, alpha), dim=1)  # [B,2K,H,W]
+    reg_input = torch.cat((prior[:, 1:2, :, :], alpha[:, 1:2, :, :]), dim=1) # [B,2,H,W]
     with torch.no_grad():  # 保持 reg_net 冻结
         affine_output = reg_net(reg_input)
         scale_pred = torch.clamp(affine_output[:, 0], config.SCALE_RANGE[0], config.SCALE_RANGE[1])
@@ -115,11 +115,15 @@ def forward_pass(image, label, prior,
                  epoch, 
                  epsilon):
     
-    if config.DATASET == "SCD":
+    angle = None
+    if config.DATASET == "SCD" or config.DATASET == "YORK":
         # 旋转对齐
         with torch.no_grad():
-            angle = align_net(image)  # 预测旋转角度
-            angle = torch.clamp(angle, config.ROTATE_RANGE[0], config.ROTATE_RANGE[1])
+            angle = align_net(image)  # 预测旋转角度，单位：弧度
+            # Config.ROTATE_RANGE 是以“度”为单位，需转换为弧度后再进行裁剪
+            low_rad = math.radians(config.ROTATE_RANGE[0])
+            high_rad = math.radians(config.ROTATE_RANGE[1])
+            angle = torch.clamp(angle, low_rad, high_rad)
             image = apply_rotate_transform(image, -angle[:, 0])  # 逆向旋转对齐
             label = apply_rotate_transform(label.float(), -angle[:, 0], mode='nearest').long()
 
@@ -166,4 +170,5 @@ def forward_pass(image, label, prior,
         "scale_pred": scale_pred,
         "tx_pred": tx_pred,
         "ty_pred": ty_pred,
+        "angle": angle,
     }

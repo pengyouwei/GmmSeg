@@ -1,13 +1,15 @@
 import torch
 import argparse
 from dataclasses import dataclass
+from dataclasses import asdict
+from pprint import pprint
 
 @dataclass
 class Config:
-    DATASET: str = "SCD"
+    DATASET: str = "ACDC"  # Options: ACDC, MM, SCD, YORK
     DATASET_DIR: str = "D:/Users/pyw/Desktop/Dataset"
     BATCH_SIZE: int = 16
-    EPOCHS: int = 100
+    EPOCHS: int = 20
     PRIOR_NUM_OF_PATIENT: int = 25
     LEARNING_RATE: float = 5e-4
     NUM_WORKERS: int = 8
@@ -20,18 +22,20 @@ class Config:
     CHECKPOINTS_DIR: str = './checkpoints'
     OUTPUT_DIR: str = './output' # Output directory for visualizations
     LOGS_DIR: str = './logs'
-    IMG_SIZE: int = 128
+    IMG_SIZE: int = 128 # 目标图片大小
     ACDC_CROP_SIZE: int = 128
-    MM_CROP_SIZE: int = 200
+    MM_CROP_SIZE: int = 128
     SCD_CROP_SIZE: int = 128
+    YORK_CROP_SIZE: int = 128
     IN_CHANNELS: int = 1
     FEATURE_NUM: int = 4
-    CLASS_NUM: int = 2 if DATASET == "SCD" else 4
+    CLASS_NUM: int = 4
     GMM_NUM: int = 4
-    SCALE_RANGE: tuple = (0.8, 1.25)
+    SCALE_RANGE: tuple = (0.5, 2.0)
     SHIFT_RANGE: tuple = (0, 0)
     ROTATE_RANGE: tuple = (-60, 60)
     USE_LABEL_PRIOR: bool = False  # 是否使用标签先验
+    METRIC_WITH_BACKGROUND: bool = False  # 评估指标是否包含背景
 
     # 开始配准的epoch
     START_REG: int = 0
@@ -69,6 +73,7 @@ def get_config():
     parser.add_argument('--acdc_crop_size', type=int, default=Config.ACDC_CROP_SIZE)
     parser.add_argument('--mm_crop_size', type=int, default=Config.MM_CROP_SIZE)
     parser.add_argument('--scd_crop_size', type=int, default=Config.SCD_CROP_SIZE)
+    parser.add_argument('--york_crop_size', type=int, default=Config.YORK_CROP_SIZE)
     parser.add_argument('--feature_num', type=int, default=Config.FEATURE_NUM)
     parser.add_argument('--in_channels', type=int, default=Config.IN_CHANNELS)
     parser.add_argument('--class_num', type=int, default=Config.CLASS_NUM)
@@ -76,6 +81,7 @@ def get_config():
     parser.add_argument('--scale_range', type=float, nargs=2, default=Config.SCALE_RANGE)
     parser.add_argument('--shift_range', type=float, nargs=2, default=Config.SHIFT_RANGE)
     parser.add_argument('--rotate_range', type=float, nargs=2, default=Config.ROTATE_RANGE)
+    parser.add_argument('--metric_with_background', type=bool, default=Config.METRIC_WITH_BACKGROUND)
     parser.add_argument('--start_reg', type=int, default=Config.START_REG)
     parser.add_argument('--use_label_prior', type=bool, default=Config.USE_LABEL_PRIOR)
     parser.add_argument('--mu_range', type=float, default=Config.MU_RANGE)
@@ -103,6 +109,7 @@ def get_config():
         ACDC_CROP_SIZE=args.acdc_crop_size,
         MM_CROP_SIZE=args.mm_crop_size,
         SCD_CROP_SIZE=args.scd_crop_size,
+        YORK_CROP_SIZE=args.york_crop_size,
         FEATURE_NUM=args.feature_num,
         IN_CHANNELS=args.in_channels,
         CLASS_NUM=args.class_num,
@@ -112,6 +119,7 @@ def get_config():
         ROTATE_RANGE=tuple(args.rotate_range),
         START_REG=args.start_reg,
         USE_LABEL_PRIOR=args.use_label_prior,
+        METRIC_WITH_BACKGROUND=args.metric_with_background,
         MU_RANGE=args.mu_range,
         LOG_VAR_MIN=args.log_var_min,
         LOG_VAR_MAX=args.log_var_max,
@@ -129,7 +137,11 @@ def get_config():
     )
 
 
+def format_config(config) -> str:
+    items = asdict(config)
+    lines = [f"{k:<20}: {v}" for k, v in items.items()]
+    return "\n".join(lines)
 
 if __name__ == "__main__":
     config = get_config()
-    print(config)
+    print(format_config(config))

@@ -7,8 +7,9 @@ from config import Config
 
 
 
-def reconstruction_loss(x, mu, var, pi):
+def reconstruction_loss(x, mu, var, pi, eps: float = 1e-6):
     # 均值相关部分：衡量预测均值与真实值的差异
+    var = torch.clamp(var, min=eps)
     mu_part = -0.5 * torch.sum((x - mu) ** 2 / var, dim=2)  # [B, K, H, W]
     
     # 方差相关部分：归一化常数，衡量方差的影响
@@ -18,6 +19,7 @@ def reconstruction_loss(x, mu, var, pi):
     log_gauss = mu_part + var_part
 
     # 用混合权重π加权
+    pi = torch.clamp(pi, min=eps, max=1.0)
     recon_loss = pi * log_gauss
     recon_mu_part = pi * mu_part
     recon_var_part = pi * var_part
@@ -30,16 +32,24 @@ def reconstruction_loss(x, mu, var, pi):
     return total_recon, mu_component, var_component
 
 
-def kl_categorical_loss(pi, alpha):
-    log_pi = torch.log(pi)
+def kl_categorical_loss(pi, alpha, eps: float = 1e-6):
+    # 保障数值稳定
+    pi = torch.clamp(pi, min=eps, max=1.0)
+    # 归一化（以免累积误差导致sum!=1）
+    pi = pi / torch.clamp(torch.sum(pi, dim=1, keepdim=True), min=eps)
+    alpha = torch.clamp(alpha, min=eps)
     alpha_sum = torch.sum(alpha, dim=1, keepdim=True) # [B, 1, H, W]
+    log_pi = torch.log(pi)
     digamma_diff = digamma(alpha) - digamma(alpha_sum)  # E[log w_{ik}]
     kl = torch.sum(pi * (log_pi - digamma_diff), dim=1)  # [B, H, W]
 
     return kl.mean()
 
 
-def kl_dirichlet_loss(q_alpha, p_alpha):
+def kl_dirichlet_loss(q_alpha, p_alpha, eps: float = 1e-6):
+    # 保障参数为正
+    q_alpha = torch.clamp(q_alpha, min=eps)
+    p_alpha = torch.clamp(p_alpha, min=eps)
     q_alpha_sum = torch.sum(q_alpha, dim=1, keepdim=True)  # [B, 1, H, W]
     p_alpha_sum = torch.sum(p_alpha, dim=1, keepdim=True)  # [B, 1, H, W]
 
@@ -57,10 +67,26 @@ def kl_dirichlet_loss(q_alpha, p_alpha):
     return kl.mean()
 
 
+def kl_gaussian_loss(mu, var, eps: float = 1e-6):
+    """
+    KL(N(mu,var) || N(0,I))，假设 var 是对角协方差
+    mu: [B, K, C, H, W]
+    var: [B, K, C, H, W]
+    """
+    var = torch.clamp(var, min=eps)
+    kl = 0.5 * torch.sum(mu**2 + var - torch.log(var) - 1, dim=2)  # [B, K, H, W]
+    return kl.mean()
+
+
+
 import math
 def cosine_decay(epoch, max_epoch, start=1.0, end=0.0):
-    """余弦衰减：前后平缓，中期下降快"""
-    cos_inner = math.pi * epoch / max_epoch
+    """余弦衰减：前后平缓，中期下降快（对 max_epoch=0 做保护）"""
+    # 当总轮数为1时（max_epoch=0），直接返回start，避免除零
+    if max_epoch <= 0:
+        return float(start)
+    e = max(0, min(epoch, max_epoch))
+    cos_inner = math.pi * e / max_epoch
     return end + (start - end) * (1 + math.cos(cos_inner)) / 2
 
 
@@ -93,19 +119,23 @@ class GmmLoss(nn.Module):
         
         # ----------------------
         # 3 KL(Dir(alpha) || Dir(prior)), exact closed form
-        kl_o_loss = kl_dirichlet_loss(alpha, prior)
+        # prior 由数据集构建时已clamp，这里再次保障
+        kl_o_loss = kl_dirichlet_loss(alpha, torch.clamp(prior, min=1e-6))
 
         
-        weight_1 = cosine_decay(epoch, total_epochs-1, start=1.0, end=1.0)
-        weight_2 = cosine_decay(epoch, total_epochs-1, start=1.0, end=1.0)
-        weight_3 = cosine_decay(epoch, total_epochs-1, start=0.1, end=0.01)
+        weight_1 = cosine_decay(epoch + 1, total_epochs, start=1.0, end=1.0)
+        weight_2 = cosine_decay(epoch + 1, total_epochs, start=1.0, end=1.0)
+        weight_3 = cosine_decay(epoch + 1, total_epochs, start=0.1, end=0.01)
 
         loss_1 = recon_loss * weight_1
         loss_2 = kl_z_loss * weight_2
         loss_3 = kl_o_loss * weight_3
         
-
+        # pi_exp = pi.unsqueeze(2)  # [B, K, 1, H, W]
+        # mu_reg = (pi_exp * (mu - x) ** 2).mean()
+        # regularization_term = 10.0 * mu_reg
         regularization_term = 10 * (mu_component ** 2)
+        # regularization_term = kl_gaussian_loss(mu, var) * 0.001
         total_loss = loss_1 + loss_2 + loss_3 + regularization_term
 
 

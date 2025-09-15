@@ -15,7 +15,7 @@ from utils.train_utils import standardize_features, process_gmm_parameters
 from models.unet import UNet
 from models.regnet import RR_ResNet
 from models.align_net import Align_ResNet
-from config import Config, get_config
+from config import Config, get_config, format_config
 from tqdm import tqdm
 import matplotlib
 import matplotlib.pyplot as plt
@@ -24,31 +24,55 @@ matplotlib.use('Agg')
 from torch.utils.tensorboard import SummaryWriter
 
 
+
 class Trainer:
     def __init__(self, config: Config):
         self.config = config
-        self.logger = logging.getLogger("Train GMM Segmentation")
+        self.class_num = self.config.CLASS_NUM
+        if self.config.DATASET == "SCD":
+            self.class_num = 2  # bk, lv
+        if self.config.DATASET == "YORK":
+            self.class_num = 3  # bk, lv, myo
+
+    def get_logger(self, train: bool = True):
+        logger = logging.getLogger("trainer")
+        logger.setLevel(logging.INFO)
+
+        # === 控制台 handler（简洁） ===
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('[%(levelname)s] - %(message)s'))
+        logger.addHandler(console_handler)
+
+        # 控制台简洁打印
+        logger.info(f"Using configuration: {self.config}")
+
+        # === 文件 handler（详细） ===
+        if train:
+            logs_dir = os.path.join(self.config.LOGS_DIR, "train_logs", self.config.DATASET)
+        else:
+            logs_dir = os.path.join(self.config.LOGS_DIR, "test_logs", self.config.DATASET)
+        os.makedirs(logs_dir, exist_ok=True)
+
+        time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        log_path = os.path.join(logs_dir, f"{time_str}.log")
+
+        file_handler = logging.FileHandler(log_path, encoding="utf-8", mode="a")
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s'))
+        logger.addHandler(file_handler)
+
+        # === 写入启动信息 ===
+        logger.info("Starting training..." if train else "Starting testing...")
+
+        # 文件详细打印
+        file_handler.stream.write("Full configuration:\n" + format_config(self.config) + "\n\n")
+        file_handler.flush()
+
+        return logger, console_handler, file_handler, time_str
+
 
     def setup(self, train=True):
         random.seed(42)
-        # 设置日志记录器
-        self.logger.setLevel(logging.INFO)
-        # 创建控制台处理器
-        self.console_handler = logging.StreamHandler()
-        self.console_handler.setFormatter(logging.Formatter('[%(levelname)s] - %(message)s'))
-        # 创建文件处理器
-        logs_dir = os.path.join(self.config.LOGS_DIR, "train_logs")
-        os.makedirs(logs_dir, exist_ok=True)
-        self.time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        self.file_handler = logging.FileHandler(f"{logs_dir}/{self.time_str}.log", encoding="utf-8", mode='a')
-        self.file_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] - %(message)s'))
-        # 添加处理器
-        self.logger.addHandler(self.console_handler)
-        self.logger.addHandler(self.file_handler)
-
-        self.logger.info("Starting training...")
-        self.logger.info(f"Using configuration: {self.config}")
-
+        self.logger, self.console_handler, self.file_handler, self.time_str = self.get_logger(train=train)
         # 加载数据集
         self.train_loader, self.valid_loader, self.test_loader = get_loaders(self.config)
         self.logger.info(f"Train samples: {len(self.train_loader.dataset)}")
@@ -60,22 +84,22 @@ class Trainer:
         self.x_net = UNet(self.config.FEATURE_NUM, self.config.FEATURE_NUM * self.config.GMM_NUM * 2).to(self.config.DEVICE)  # mu, var
         self.z_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # pi
         self.o_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # d
-        self.reg_net = RR_ResNet(input_channels=self.config.GMM_NUM * 2).to(self.config.DEVICE)
+        self.reg_net = RR_ResNet(input_channels=2).to(self.config.DEVICE)
         self.align_net = Align_ResNet(input_channels=1).to(self.config.DEVICE)
 
 
         # 加载预训练权重 (修复: 启用所有预训练权重的加载)
         try:
-            x_net_weights = torch.load("checkpoints/unet/x_pretrained.pth", 
+            # x_net_weights = torch.load("checkpoints/unet/x_pretrained.pth", 
+            #                            map_location=self.config.DEVICE, 
+            #                            weights_only=True)
+            # z_net_weights = torch.load("checkpoints/unet/z_pretrained.pth", 
+            #                            map_location=self.config.DEVICE, 
+            #                            weights_only=True)
+            o_net_weights = torch.load("checkpoints/unet/o_pretrained.pth", 
                                        map_location=self.config.DEVICE, 
                                        weights_only=True)
-            z_net_weights = torch.load("checkpoints/unet/z_pretrained.pth", 
-                                       map_location=self.config.DEVICE, 
-                                       weights_only=True)
-            o_net_weights = torch.load("checkpoints/unet/o_pretrained_acdc.pth", 
-                                       map_location=self.config.DEVICE, 
-                                       weights_only=True)
-            reg_net_weights = torch.load("checkpoints/regnet/regnet_prior_4chs.pth", 
+            reg_net_weights = torch.load("checkpoints/regnet/regnet_prior_2chs.pth", 
                                          map_location=self.config.DEVICE, 
                                           weights_only=True)
             align_net_weights = torch.load("checkpoints/align_net/align_best.pth",
@@ -132,12 +156,12 @@ class Trainer:
 
         if train:
             # 创建日志记录器
-            log_dir = os.path.join(self.config.LOGS_DIR, "tensorboard", self.time_str)
+            log_dir = os.path.join(self.config.LOGS_DIR, "tensorboard", self.config.DATASET, self.time_str)
             os.makedirs(log_dir, exist_ok=True)
             self.writer = SummaryWriter(log_dir)
 
             # 创建输出目录
-            self.output_dir = os.path.join(self.config.OUTPUT_DIR, self.time_str)
+            self.output_dir = os.path.join(self.config.OUTPUT_DIR, self.config.DATASET, self.time_str)
             os.makedirs(self.output_dir, exist_ok=True)
 
 
@@ -285,18 +309,19 @@ class Trainer:
                 scale_pred = forward_pass_result["scale_pred"]
                 tx_pred = forward_pass_result["tx_pred"]
                 ty_pred = forward_pass_result["ty_pred"]
+                angle = forward_pass_result["angle"]
 
 
                 # 计算损失 (添加异常处理)
                 try:
                     loss_out = self.criterion(input=img_4_chs,
-                                         mu=mu,
-                                         var=var,
-                                         pi=pi,
-                                         alpha=d1,
-                                         prior=d0,
-                                         epoch=epoch,
-                                         total_epochs=self.config.EPOCHS)
+                                              mu=mu,
+                                              var=var,
+                                              pi=pi,
+                                              alpha=d1,
+                                              prior=d0,
+                                              epoch=epoch,
+                                              total_epochs=self.config.EPOCHS)
                     loss = loss_out['total']
                     loss_1 = loss_out['recon']
                     mu_component = loss_out['recon_mu']
@@ -330,9 +355,18 @@ class Trainer:
                 pred_cls = torch.argmax(r, dim=1).detach().cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
 
-                dice_total += dice_coefficient(pred_cls, label_np, self.config.CLASS_NUM, background=False)
-                iou_total += iou_score(pred_cls, label_np, self.config.CLASS_NUM, background=False)
-                pixel_err_total += pixel_error(pred_cls, label_np, self.config.CLASS_NUM, background=False)
+                if self.config.DATASET == "SCD":
+                    # SCD: 将预测中的类别2、3视为背景，避免无效类别拉低指标
+                    pred_cls[pred_cls == 2] = 0
+                    pred_cls[pred_cls == 3] = 0
+                if self.config.DATASET == "YORK":
+                    # YORK: 网络输出有4通道，但标注通常仅含0/1/2，将预测的3类归为背景
+                    pred_cls[pred_cls == 3] = 0
+
+                # 指标与测试保持一致：不计入背景（更符合常见分割评估）
+                dice_total += dice_coefficient(pred_cls, label_np, self.class_num, background=self.config.METRIC_WITH_BACKGROUND)
+                iou_total += iou_score(pred_cls, label_np, self.class_num, background=self.config.METRIC_WITH_BACKGROUND)
+                pixel_err_total += pixel_error(pred_cls, label_np, self.class_num, background=self.config.METRIC_WITH_BACKGROUND)
 
         self.valid_loss_1 = valid_loss_1 / len(self.valid_loader)
         self.valid_loss_2 = valid_loss_2 / len(self.valid_loader)
@@ -356,6 +390,9 @@ class Trainer:
         self.scale_pred = scale_pred[i].item()
         self.tx_pred = tx_pred[i].item()
         self.ty_pred = ty_pred[i].item()
+        # 角度单位提示：align_net 输出为“弧度”，日志中转为“度”展示
+        self.angle_rad = angle[i].item() if angle is not None else None
+        self.angle_deg = math.degrees(self.angle_rad) if self.angle_rad is not None else None
         # 记录高斯参数范围
         self.mu_min = mu.min().item()
         self.mu_max = mu.max().item()
@@ -373,13 +410,13 @@ class Trainer:
         if len(self.test_loader) == 0:
             return
 
-        x_net_weights = torch.load("checkpoints/unet/x_best.pth",
+        x_net_weights = torch.load(f"checkpoints/unet/{self.config.DATASET}/x_best.pth",
                                     map_location=self.config.DEVICE, 
                                     weights_only=True)
-        z_net_weights = torch.load("checkpoints/unet/z_best.pth", 
+        z_net_weights = torch.load(f"checkpoints/unet/{self.config.DATASET}/z_best.pth", 
                                     map_location=self.config.DEVICE, 
                                     weights_only=True)
-        o_net_weights = torch.load("checkpoints/unet/o_best.pth",
+        o_net_weights = torch.load(f"checkpoints/unet/{self.config.DATASET}/o_best.pth",
                                     map_location=self.config.DEVICE, 
                                     weights_only=True)
         unet_weights = torch.load("checkpoints/unet/unet_best.pth", 
@@ -405,11 +442,14 @@ class Trainer:
                 image = batch['image'].to(self.config.DEVICE, dtype=torch.float32)
                 label = batch['label'].to(self.config.DEVICE, dtype=torch.float32)
 
-                if self.config.DATASET == "SCD":
-                    angle = self.align_net(image)  # 预测旋转角度
-                    angle = torch.clamp(angle, config.ROTATE_RANGE[0], config.ROTATE_RANGE[1])
-                    image = apply_rotate_transform(image, -angle[:, 0])  # 逆向旋转对齐
-                    label = apply_rotate_transform(label.float(), -angle[:, 0], mode='nearest').long()
+                if self.config.DATASET == "SCD" or self.config.DATASET == "YORK":
+                    angle = self.align_net(image)  # 预测旋转角度（弧度）
+                    # 将度制范围转换为弧度后进行裁剪
+                    low_rad = math.radians(self.config.ROTATE_RANGE[0])
+                    high_rad = math.radians(self.config.ROTATE_RANGE[1])
+                    angle_rad = torch.clamp(angle, low_rad, high_rad)
+                    image = apply_rotate_transform(image, -angle_rad[:, 0])  # 逆向旋转对齐
+                    label = apply_rotate_transform(label.float(), -angle_rad[:, 0], mode='nearest').long()
 
                 img_4_chs = self.unet(image)
                 img_4_chs = standardize_features(img_4_chs)
@@ -425,7 +465,16 @@ class Trainer:
                 r = compute_responsibilities(x=img_4_chs, mu=mu, var=var, alpha=alpha)
                 pred = torch.argmax(r, dim=1).detach().cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
-                test_dice += dice_coefficient(pred, label_np, self.config.CLASS_NUM, background=False)
+
+                # 与验证一致的类别后处理：
+                if self.config.DATASET == "SCD":
+                    pred[pred == 2] = 0
+                    pred[pred == 3] = 0
+                if self.config.DATASET == "YORK":
+                    pred[pred == 3] = 0
+
+                # 评估指标：不计背景
+                test_dice += dice_coefficient(pred, label_np, self.class_num, background=self.config.METRIC_WITH_BACKGROUND)
 
         
         test_dice /= len(self.test_loader)
@@ -458,10 +507,13 @@ class Trainer:
                 f"d0 range: [{self.d0_min:.4f}, {self.d0_max:.4f}]  "
             )
 
+            # 日志展示：角度以“度”为单位（内部计算均为弧度）
+            angle_str = "N/A" if not hasattr(self, "angle_deg") or self.angle_deg is None else f"{self.angle_deg:.2f} deg"
             self.logger.info(
                 f"scale: {self.scale_pred:.2f}  "
                 f"tx: {self.tx_pred:.2f}  "
-                f"ty: {self.ty_pred:.2f}"
+                f"ty: {self.ty_pred:.2f}  "
+                f"angle: {angle_str}"
             )
 
             self.logger.info(
@@ -474,7 +526,7 @@ class Trainer:
 
 
     def save_checkpoints(self, epoch):
-        checkpoints_dir = os.path.join(self.config.CHECKPOINTS_DIR, "unet")
+        checkpoints_dir = os.path.join(self.config.CHECKPOINTS_DIR, "unet", self.config.DATASET)
         os.makedirs(checkpoints_dir, exist_ok=True)
         if self.avg_dice > self.config.BEST_DICE:
             self.config.BEST_DICE = self.avg_dice

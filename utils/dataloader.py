@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
-from data.dataset import ACDCDataset, MMDataset, SCDDataset
+from data.dataset import ACDCDataset, MMDataset, SCDDataset, YORKDataset
 from data.transform import get_image_transform, get_label_transform
 from config import Config
 import os
@@ -15,7 +15,7 @@ def get_loaders(config: Config):
     image_transform = get_image_transform(config.IMG_SIZE)
     label_transform = get_label_transform(config.IMG_SIZE)
     match dataset_name:
-        case "ACDC_aligned":
+        case "ACDC":
             train_set = ACDCDataset(phase="train", 
                                     transform_image=image_transform, 
                                     transform_label=label_transform, 
@@ -54,6 +54,19 @@ def get_loaders(config: Config):
                                   transform_image=image_transform, 
                                   transform_label=label_transform, 
                                   config=config)
+        case "YORK":
+            train_set = YORKDataset(phase="train", 
+                                   transform_image=image_transform, 
+                                   transform_label=label_transform, 
+                                   config=config)
+            valid_set = YORKDataset(phase="val", 
+                                   transform_image=image_transform, 
+                                   transform_label=label_transform, 
+                                   config=config)
+            test_set = YORKDataset(phase="test", 
+                                  transform_image=image_transform, 
+                                  transform_label=label_transform, 
+                                  config=config)
         case _:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -68,13 +81,13 @@ def get_loaders(config: Config):
                               shuffle=False,
                               num_workers=config.NUM_WORKERS, 
                               pin_memory=True, 
-                              drop_last=True)
+                              drop_last=False)
     test_loader = DataLoader(test_set, 
                              batch_size=config.BATCH_SIZE, 
                              shuffle=False,
                              num_workers=config.NUM_WORKERS, 
                              pin_memory=True, 
-                             drop_last=True)
+                             drop_last=False)
 
     return train_loader, valid_loader, test_loader
 

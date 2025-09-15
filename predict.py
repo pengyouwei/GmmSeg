@@ -2,7 +2,6 @@ import os
 import torch
 import numpy as np
 import matplotlib
-from data.transform import get_image_transform
 from models.regnet import RR_ResNet
 from models.unet import UNet
 from config import get_config, Config
@@ -11,6 +10,19 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from utils.train_utils import standardize_features
 # matplotlib.use('Agg')
+
+def get_image_transform(img_size):
+    return transforms.Compose([
+        transforms.CenterCrop((img_size, img_size)), 
+        transforms.ToTensor(),  # 转为张量，范围 [0, 1]
+        transforms.Normalize(mean=[0.5], std=[0.5])  # 标准化到 [-1, 1]
+    ])
+
+def get_label_transform(img_size):
+    return transforms.Compose([
+        transforms.CenterCrop((img_size, img_size)),
+        transforms.PILToTensor()
+    ])
 
 
 class Predictor:
@@ -30,9 +42,9 @@ class Predictor:
 
 	def load_weights(self):
 		unet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'unet_best.pth')
-		xnet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'x_best.pth')
-		znet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'z_best.pth')
-		onet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', 'o_best.pth')
+		xnet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', self.config.DATASET, 'x_best.pth')
+		znet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', self.config.DATASET, 'z_best.pth')
+		onet_weight_path = os.path.join(self.config.CHECKPOINTS_DIR, 'unet', self.config.DATASET, 'o_best.pth')
 		self.unet.load_state_dict(torch.load(unet_weight_path, map_location=self.device))
 		self.x_net.load_state_dict(torch.load(xnet_weight_path, map_location=self.device))
 		self.z_net.load_state_dict(torch.load(znet_weight_path, map_location=self.device))
@@ -47,6 +59,7 @@ class Predictor:
 		if image_path.endswith('.npy'):
 			print("Loading numpy array from:", image_path)
 			image = np.load(image_path)
+			image = (image - image.min()) / (image.max() - image.min())  # 归一化到0-1
 			image = Image.fromarray((image * 255).astype(np.uint8))
 			image = self.transform_image(image).unsqueeze(0).to(self.device)  # [1, 1, H, W]
 
