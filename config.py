@@ -3,13 +3,16 @@ import argparse
 from dataclasses import dataclass
 from dataclasses import asdict
 from pprint import pprint
+import random
 
 @dataclass
 class Config:
-    DATASET: str = "ACDC"  # Options: ACDC, MM, SCD, YORK
+    SEED: int = 42
+    # SEED: int = random.randint(0, 2**32 - 1)  # 每次运行时生成一个随机种子
+    DATASET: str = "YORK"  # Options: ACDC, MM, SCD, YORK
     DATASET_DIR: str = "D:/Users/pyw/Desktop/Dataset"
     BATCH_SIZE: int = 16
-    EPOCHS: int = 20
+    EPOCHS: int = 50
     PRIOR_NUM_OF_PATIENT: int = 25
     LEARNING_RATE: float = 5e-4
     NUM_WORKERS: int = 8
@@ -21,17 +24,20 @@ class Config:
     DEVICE: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     CHECKPOINTS_DIR: str = './checkpoints'
     OUTPUT_DIR: str = './output' # Output directory for visualizations
+    VISUALIZE: bool = True
     LOGS_DIR: str = './logs'
+    ADD_TENSORBOARD: bool = False
     IMG_SIZE: int = 128 # 目标图片大小
-    ACDC_CROP_SIZE: int = 128
     MM_CROP_SIZE: int = 128
     SCD_CROP_SIZE: int = 128
     YORK_CROP_SIZE: int = 128
+    ACDC_CROP_SIZE: int = 128
     IN_CHANNELS: int = 1
     FEATURE_NUM: int = 4
-    CLASS_NUM: int = 4
     GMM_NUM: int = 4
-    SCALE_RANGE: tuple = (0.5, 2.0)
+    DO_IMAGE_SCALE: bool = False  # 是否进行图像缩放
+    IMAGE_SCALE_RANGE: tuple = (0.5, 2.0)
+    PRIOR_SCALE_RANGE: tuple = (0.5, 2.0) if DATASET == "MM" else (0.8, 1.25)
     SHIFT_RANGE: tuple = (0, 0)
     ROTATE_RANGE: tuple = (-60, 60)
     USE_LABEL_PRIOR: bool = False  # 是否使用标签先验
@@ -53,12 +59,21 @@ class Config:
     PREDICT_DIR: str | None = None           # 批量预测目录
     RESULTS_DIR: str = './results'           # 结果保存目录
 
+    MODE: str = 'train'  # train | test 
+
+
+    # 后处理相关
+    ENABLE_POSTPROCESS: bool = False
+    POSTPROCESS_MIN_SIZE: int = 30
+    POSTPROCESS_KERNEL_SIZE: int = 3
+    POSTPROCESS_MAX_DIST_RATIO: float = 0.3  # 相对于图像大小的最大距离比例
 
 
 
 def get_config():
     parser = argparse.ArgumentParser(description="Training Config")
 
+    parser.add_argument('--seed', type=int, default=Config.SEED)
     parser.add_argument('--dataset', type=str, default=Config.DATASET)
     parser.add_argument('--dataset_dir', type=str, default=Config.DATASET_DIR)
     parser.add_argument('--batch_size', type=int, default=Config.BATCH_SIZE)
@@ -67,6 +82,8 @@ def get_config():
     parser.add_argument('--lr', type=float, default=Config.LEARNING_RATE)
     parser.add_argument('--num_workers', type=int, default=Config.NUM_WORKERS)
     parser.add_argument('--checkpoints_dir', type=str, default=Config.CHECKPOINTS_DIR)
+    parser.add_argument('--visualize', type=bool, default=Config.VISUALIZE)
+    parser.add_argument('--add_tensorboard', type=bool, default=Config.ADD_TENSORBOARD)
     parser.add_argument('--output_dir', type=str, default=Config.OUTPUT_DIR)
     parser.add_argument('--logs_dir', type=str, default=Config.LOGS_DIR)
     parser.add_argument('--img_size', type=int, default=Config.IMG_SIZE)
@@ -76,9 +93,10 @@ def get_config():
     parser.add_argument('--york_crop_size', type=int, default=Config.YORK_CROP_SIZE)
     parser.add_argument('--feature_num', type=int, default=Config.FEATURE_NUM)
     parser.add_argument('--in_channels', type=int, default=Config.IN_CHANNELS)
-    parser.add_argument('--class_num', type=int, default=Config.CLASS_NUM)
     parser.add_argument('--gmm_num', type=int, default=Config.GMM_NUM)
-    parser.add_argument('--scale_range', type=float, nargs=2, default=Config.SCALE_RANGE)
+    parser.add_argument('--do_image_scale', type=bool, default=Config.DO_IMAGE_SCALE)
+    parser.add_argument('--image_scale_range', type=float, nargs=2, default=Config.IMAGE_SCALE_RANGE)
+    parser.add_argument('--prior_scale_range', type=float, nargs=2, default=Config.PRIOR_SCALE_RANGE)
     parser.add_argument('--shift_range', type=float, nargs=2, default=Config.SHIFT_RANGE)
     parser.add_argument('--rotate_range', type=float, nargs=2, default=Config.ROTATE_RANGE)
     parser.add_argument('--metric_with_background', type=bool, default=Config.METRIC_WITH_BACKGROUND)
@@ -91,10 +109,17 @@ def get_config():
     parser.add_argument('--predict_img', type=str, default=Config.PREDICT_IMG)
     parser.add_argument('--predict_dir', type=str, default=Config.PREDICT_DIR)
     parser.add_argument('--results_dir', type=str, default=Config.RESULTS_DIR)
-    
+    parser.add_argument('--mode', type=str, default=Config.MODE)
+
+    parser.add_argument('--enable_postprocess', type=bool, default=Config.ENABLE_POSTPROCESS)
+    parser.add_argument('--postprocess_min_size', type=int, default=Config.POSTPROCESS_MIN_SIZE)
+    parser.add_argument('--postprocess_kernel_size', type=int, default=Config.POSTPROCESS_KERNEL_SIZE)
+    parser.add_argument('--postprocess_max_dist_ratio', type=float, default=Config.POSTPROCESS_MAX_DIST_RATIO)
+
     args = parser.parse_args()
 
     return Config(
+        SEED=args.seed,
         DATASET=args.dataset,
         DATASET_DIR=args.dataset_dir,
         BATCH_SIZE=args.batch_size,
@@ -105,6 +130,8 @@ def get_config():
         CHECKPOINTS_DIR=args.checkpoints_dir,
         OUTPUT_DIR=args.output_dir,
         LOGS_DIR=args.logs_dir,
+        VISUALIZE=args.visualize,
+        ADD_TENSORBOARD=args.add_tensorboard,
         IMG_SIZE=args.img_size,
         ACDC_CROP_SIZE=args.acdc_crop_size,
         MM_CROP_SIZE=args.mm_crop_size,
@@ -112,9 +139,10 @@ def get_config():
         YORK_CROP_SIZE=args.york_crop_size,
         FEATURE_NUM=args.feature_num,
         IN_CHANNELS=args.in_channels,
-        CLASS_NUM=args.class_num,
         GMM_NUM=args.gmm_num,
-        SCALE_RANGE=tuple(args.scale_range),
+        DO_IMAGE_SCALE=args.do_image_scale,
+        IMAGE_SCALE_RANGE=tuple(args.image_scale_range),
+        PRIOR_SCALE_RANGE=tuple(args.prior_scale_range),
         SHIFT_RANGE=tuple(args.shift_range),
         ROTATE_RANGE=tuple(args.rotate_range),
         START_REG=args.start_reg,
@@ -127,6 +155,11 @@ def get_config():
         PREDICT_IMG=args.predict_img,
         PREDICT_DIR=args.predict_dir,
         RESULTS_DIR=args.results_dir,
+        MODE=args.mode,
+        ENABLE_POSTPROCESS=args.enable_postprocess,
+        POSTPROCESS_MIN_SIZE=args.postprocess_min_size,
+        POSTPROCESS_KERNEL_SIZE=args.postprocess_kernel_size,
+        POSTPROCESS_MAX_DIST_RATIO=args.postprocess_max_dist_ratio,
         # 保留默认值（不可通过命令行修改）
         BEST_LOSS=Config.BEST_LOSS,
         BEST_DICE=Config.BEST_DICE,

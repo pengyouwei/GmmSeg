@@ -9,7 +9,6 @@ from config import Config
 
 def reconstruction_loss(x, mu, var, pi, eps: float = 1e-6):
     # 均值相关部分：衡量预测均值与真实值的差异
-    var = torch.clamp(var, min=eps)
     mu_part = -0.5 * torch.sum((x - mu) ** 2 / var, dim=2)  # [B, K, H, W]
     
     # 方差相关部分：归一化常数，衡量方差的影响
@@ -19,7 +18,7 @@ def reconstruction_loss(x, mu, var, pi, eps: float = 1e-6):
     log_gauss = mu_part + var_part
 
     # 用混合权重π加权
-    pi = torch.clamp(pi, min=eps, max=1.0)
+    pi = torch.clamp(pi, min=eps)
     recon_loss = pi * log_gauss
     recon_mu_part = pi * mu_part
     recon_var_part = pi * var_part
@@ -28,21 +27,16 @@ def reconstruction_loss(x, mu, var, pi, eps: float = 1e-6):
     total_recon = -torch.mean(torch.sum(recon_loss, dim=1))
     mu_component = -torch.mean(torch.sum(recon_mu_part, dim=1))
     var_component = -torch.mean(torch.sum(recon_var_part, dim=1))
-    
     return total_recon, mu_component, var_component
 
 
 def kl_categorical_loss(pi, alpha, eps: float = 1e-6):
-    # 保障数值稳定
-    pi = torch.clamp(pi, min=eps, max=1.0)
-    # 归一化（以免累积误差导致sum!=1）
-    pi = pi / torch.clamp(torch.sum(pi, dim=1, keepdim=True), min=eps)
+    pi = torch.clamp(pi, min=eps)
     alpha = torch.clamp(alpha, min=eps)
-    alpha_sum = torch.sum(alpha, dim=1, keepdim=True) # [B, 1, H, W]
     log_pi = torch.log(pi)
+    alpha_sum = torch.sum(alpha, dim=1, keepdim=True) # [B, 1, H, W]
     digamma_diff = digamma(alpha) - digamma(alpha_sum)  # E[log w_{ik}]
     kl = torch.sum(pi * (log_pi - digamma_diff), dim=1)  # [B, H, W]
-
     return kl.mean()
 
 
@@ -63,7 +57,6 @@ def kl_dirichlet_loss(q_alpha, p_alpha, eps: float = 1e-6):
     term_sum = torch.sum(term, dim=1)  # [B, H, W]
 
     kl = logB_p - logB_q + term_sum  # [B, H, W]
-
     return kl.mean()
 
 
@@ -74,12 +67,20 @@ def kl_gaussian_loss(mu, var, eps: float = 1e-6):
     var: [B, K, C, H, W]
     """
     var = torch.clamp(var, min=eps)
-    kl = 0.5 * torch.sum(mu**2 + var - torch.log(var) - 1, dim=2)  # [B, K, H, W]
+    kl = 0.5 * (mu.pow(2) + var - torch.log(var) - 1)
+    kl = kl.sum(dim=2)
     return kl.mean()
 
 
 
 import math
+def cosine_warmup(epoch: int, warmup_epochs: int) -> float:
+    # 0 -> 1 的余弦热身
+    e = max(0, min(epoch, warmup_epochs))
+    if warmup_epochs <= 0:
+        return 1.0
+    return 0.5 * (1 - math.cos(math.pi * e / warmup_epochs))
+
 def cosine_decay(epoch, max_epoch, start=1.0, end=0.0):
     """余弦衰减：前后平缓，中期下降快（对 max_epoch=0 做保护）"""
     # 当总轮数为1时（max_epoch=0），直接返回start，避免除零
@@ -119,23 +120,20 @@ class GmmLoss(nn.Module):
         
         # ----------------------
         # 3 KL(Dir(alpha) || Dir(prior)), exact closed form
-        # prior 由数据集构建时已clamp，这里再次保障
-        kl_o_loss = kl_dirichlet_loss(alpha, torch.clamp(prior, min=1e-6))
+        kl_o_loss = kl_dirichlet_loss(alpha, prior)
 
+        warm = cosine_warmup(epoch + 1, warmup_epochs=5)
         
-        weight_1 = cosine_decay(epoch + 1, total_epochs, start=1.0, end=1.0)
-        weight_2 = cosine_decay(epoch + 1, total_epochs, start=1.0, end=1.0)
-        weight_3 = cosine_decay(epoch + 1, total_epochs, start=0.1, end=0.01)
+        weight_1 = 1.0
+        weight_2 = 0.1 * warm
+        weight_3 = cosine_decay(epoch + 1, total_epochs, start=0.1, end=0.001)
 
         loss_1 = recon_loss * weight_1
         loss_2 = kl_z_loss * weight_2
         loss_3 = kl_o_loss * weight_3
-        
-        # pi_exp = pi.unsqueeze(2)  # [B, K, 1, H, W]
-        # mu_reg = (pi_exp * (mu - x) ** 2).mean()
-        # regularization_term = 10.0 * mu_reg
-        regularization_term = 10 * (mu_component ** 2)
-        # regularization_term = kl_gaussian_loss(mu, var) * 0.001
+
+        regularization_term = kl_gaussian_loss(mu, var) * 0.001
+
         total_loss = loss_1 + loss_2 + loss_3 + regularization_term
 
 
@@ -145,8 +143,8 @@ class GmmLoss(nn.Module):
             'recon': loss_1,
             'recon_mu': mu_component,
             'recon_var': var_component,
-            'kl_pi': loss_2,          # KL(q(z|x) || p(z|Ω))
-            'kl_dir': loss_3,         # KL(Dir(alpha) || Dir(prior))，已乘以动态权重
+            'kl_pi': loss_2, 
+            'kl_dir': loss_3,  
             'weight_1': weight_1,
             'weight_2': weight_2,
             'weight_3': weight_3,

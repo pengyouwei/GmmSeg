@@ -6,7 +6,7 @@ from config import Config
 
 
 class RR_ResNet(nn.Module):
-    def __init__(self, input_channels=8, scale_range=Config().SCALE_RANGE, shift_range=Config().SHIFT_RANGE):
+    def __init__(self, input_channels=2, scale_range=Config().PRIOR_SCALE_RANGE, shift_range=Config().SHIFT_RANGE):
         super(RR_ResNet, self).__init__()
         self.scale_range = scale_range
         self.shift_range = shift_range

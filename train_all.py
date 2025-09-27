@@ -4,7 +4,7 @@ from config import Config, get_config
 from train import Trainer
 
 
-SUPPORTED_DATASETS = ["MM", "SCD", "YORK"]
+SUPPORTED_DATASETS = ["SCD", "YORK", "MM"]
 
 
 def main():

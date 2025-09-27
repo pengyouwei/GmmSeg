@@ -6,16 +6,8 @@ import numpy as np
 from PIL import Image
 from config import Config
 from data.transform import center_crop_image_label
-
-
-def _map_slice_index(idx_in_volume: int, total_slices: int, target_bins: int = 10) -> int:
-    """
-    将当前体的数据切片索引(0-based)映射到 [0, target_bins-1] (默认 0-9).
-    使用线性缩放 + round 保证首尾映射为 0 与 target_bins-1。
-    """
-    if total_slices <= 1:
-        return 0
-    return int(round(idx_in_volume * (target_bins - 1) / (total_slices - 1)))
+import re
+from typing import List
 
 
 # 定义数据集ACDCDataset
@@ -53,6 +45,7 @@ class ACDCDataset(Dataset):
                         'path': image_file.path,
                         'slice_id': slice_id,
                         'prior_path': prior_path,
+                        'frame_name': frame_name
                     })
                 for label_file in os.scandir(phase_label_path):
                     if not label_file.name.endswith('.npy'): continue
@@ -61,6 +54,7 @@ class ACDCDataset(Dataset):
                         'path': label_file.path,
                         'slice_id': slice_id,
                         'prior_path': prior_path,
+                        'frame_name': frame_name
                     })
 
         self.images.sort(key=lambda x: x['path'])
@@ -71,6 +65,7 @@ class ACDCDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
+        frame_name = self.images[idx]['frame_name']
         slice_id = self.images[idx]['slice_id']
         image = np.load(self.images[idx]['path'])
         label = np.load(self.labels[idx]['path'])
@@ -103,7 +98,7 @@ class ACDCDataset(Dataset):
 
 
         # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.img_size, self.img_size), dtype=np.float32)
+        label_prior = np.zeros((self.gmm_num, self.config.ACDC_CROP_SIZE, self.config.ACDC_CROP_SIZE), dtype=np.float32)
         label_np = label.squeeze().detach().cpu().numpy()
         for k in range(self.gmm_num):
             label_prior[k] = (label_np == k).astype(np.float32)
@@ -113,6 +108,10 @@ class ACDCDataset(Dataset):
         return {
             "image": image,
             "label": label,
+            "slice_id": slice_id,
+            "ds": "ACDC",
+            "frame_name": frame_name,
+            "class_num": 4,
             "prior": prior,
             "label_prior": label_prior,
         }
@@ -170,6 +169,7 @@ class MMDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
+        frame_name = self.images[idx]['frame_name']
         slice_id = self.images[idx]['slice_id']
         image = np.load(self.images[idx]['path'])
         label = np.load(self.labels[idx]['path'])
@@ -201,11 +201,10 @@ class MMDataset(Dataset):
         else:
             prior = torch.tensor(prior, dtype=torch.float32)
         prior = torch.clamp(prior, min=1e-6, max=1.0)
-        # prior = torch.flip(prior, dims=[2])
 
 
         # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.img_size, self.img_size), dtype=np.float32)
+        label_prior = np.zeros((self.gmm_num, self.config.MM_CROP_SIZE, self.config.MM_CROP_SIZE), dtype=np.float32)
         label_np = label.squeeze().detach().cpu().numpy()
         for k in range(self.gmm_num):
             label_prior[k] = (label_np == k).astype(np.float32)
@@ -215,6 +214,10 @@ class MMDataset(Dataset):
         return {
             "image": image,
             "label": label,
+            "slice_id": slice_id,
+            "ds": "MM",
+            "frame_name": frame_name,
+            "class_num": 4,
             "prior": prior,
             "label_prior": label_prior
         }
@@ -272,6 +275,7 @@ class SCDDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
+        frame_name = self.images[idx]['frame_name']
         slice_id = self.images[idx]['slice_id']
         image = np.load(self.images[idx]['path'])
         label = np.load(self.labels[idx]['path'])
@@ -285,12 +289,9 @@ class SCDDataset(Dataset):
         if self.transform_image:
             image = self.transform_image(image) # [C, H, W]
             image = torch.rot90(image, k=3, dims=[1, 2]) # 顺时针旋转90度
-            # image = torch.flip(image, dims=[2])  # 左右翻转
-            
         if self.transform_label:
             label = self.transform_label(label) # [C, H, W]
             label = torch.rot90(label, k=3, dims=[1, 2]) # 顺时针旋转90度
-            # label = torch.flip(label, dims=[2])
 
 
         # 读取数据集中的prior
@@ -309,7 +310,7 @@ class SCDDataset(Dataset):
 
 
         # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.img_size, self.img_size), dtype=np.float32)
+        label_prior = np.zeros((self.gmm_num, self.config.SCD_CROP_SIZE, self.config.SCD_CROP_SIZE), dtype=np.float32)
         label_np = label.squeeze().detach().cpu().numpy()
         for k in range(self.gmm_num):
             label_prior[k] = (label_np == k).astype(np.float32)
@@ -319,6 +320,10 @@ class SCDDataset(Dataset):
         return {
             "image": image,
             "label": label,
+            "slice_id": slice_id,
+            "ds": "SCD",
+            "frame_name": frame_name,
+            "class_num": 2,
             "prior": prior,
             "label_prior": label_prior
         }
@@ -364,6 +369,7 @@ class YORKDataset(Dataset):
 
     def __getitem__(self, idx):
         slice_id = self.patients[idx]['slice_id']
+        frame_name = self.patients[idx]['frame_name']
         patient = np.load(self.patients[idx]['path'])
         image = patient["img"]
         label = patient["seg"]
@@ -383,15 +389,13 @@ class YORKDataset(Dataset):
         if self.transform_image:
             image = self.transform_image(image) # [C, H, W]
             image = torch.rot90(image, k=3, dims=[1, 2]) # 顺时针旋转90度
-            # image = torch.flip(image, dims=[2])  # 左右翻转
         if self.transform_label:
             label = self.transform_label(label) # [C, H, W]
             label = torch.rot90(label, k=3, dims=[1, 2]) # 顺时针旋转90度
-            # label = torch.flip(label, dims=[2])
         
         # 读取数据集中的prior
         max_slice_id = 9
-        slice_id = min(slice_id, max_slice_id)
+        slice_id = min(slice_id-1, max_slice_id)
         prior = np.load(self.patients[idx]['prior_path'])[slice_id]
         prior_size = prior.shape[-1]
         if prior_size != self.img_size:
@@ -404,7 +408,7 @@ class YORKDataset(Dataset):
         prior = torch.clamp(prior, min=1e-6, max=1.0)
 
         # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.img_size, self.img_size), dtype=np.float32)
+        label_prior = np.zeros((self.gmm_num, self.config.YORK_CROP_SIZE, self.config.YORK_CROP_SIZE), dtype=np.float32)
         label_np = label.squeeze().detach().cpu().numpy()
         for k in range(self.gmm_num):
             label_prior[k] = (label_np == k).astype(np.float32)
@@ -415,8 +419,71 @@ class YORKDataset(Dataset):
         return {
             "image": image,
             "label": label,
+            "slice_id": slice_id,
+            "ds": "YORK",
+            "frame_name": frame_name,
+            "class_num": 3,
             "prior": prior,
             "label_prior": label_prior
         }
 
     
+class CombinedDataset(Dataset):
+    def __init__(self, datasets):
+        """
+        A dataset that combines multiple underlying datasets.
+
+        Args:
+            datasets: A list of (name, dataset_instance) tuples OR a list of dataset
+                      names among ["ACDC", "MM", "SCD", "YORK"]. If a string like
+                      "ALL", "ACDC+MM" or "ACDC,MM" is provided instead, prefer using
+                      the CombinedDataset via the dataloader.get_loaders wrapper.
+        """
+        super().__init__()
+        self._sources: List[str] = []
+        self._sets: List[Dataset] = []
+        self._cum_lengths: List[int] = []
+
+        # Normalize input to list of (name, dataset) tuples
+        normalized: List[tuple[str, Dataset]] = []
+        if isinstance(datasets, list) and len(datasets) > 0:
+            if isinstance(datasets[0], tuple):
+                normalized = datasets  # Already (name, dataset) pairs
+            else:
+                raise ValueError("CombinedDataset expects list of (name, dataset) tuples when used directly.")
+        else:
+            raise ValueError("CombinedDataset requires a non-empty list of datasets.")
+
+        total = 0
+        for name, ds in normalized:
+            if not isinstance(name, str) or not isinstance(ds, Dataset):
+                raise TypeError("Each item must be a (str, Dataset) pair.")
+            self._sources.append(name)
+            self._sets.append(ds)
+            total += len(ds)
+            self._cum_lengths.append(total)
+
+    def __len__(self):
+        return self._cum_lengths[-1] if self._cum_lengths else 0
+
+    def __getitem__(self, idx):
+        if idx < 0:
+            idx = len(self) + idx
+        if idx < 0 or idx >= len(self):
+            raise IndexError("Index out of range in CombinedDataset")
+
+        # Find which sub-dataset this index falls into
+        ds_idx = 0
+        while idx >= self._cum_lengths[ds_idx]:
+            ds_idx += 1
+        prev_cum = 0 if ds_idx == 0 else self._cum_lengths[ds_idx - 1]
+        local_idx = idx - prev_cum
+
+        sample = self._sets[ds_idx][local_idx]
+
+        # Attach the source dataset name for downstream logging/analysis
+        if isinstance(sample, dict):
+            sample = dict(sample)  # shallow copy
+            sample.setdefault("source", self._sources[ds_idx])
+        return sample
+        

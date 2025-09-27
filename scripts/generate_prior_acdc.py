@@ -60,47 +60,74 @@ def choose_slice_index(i: int, prior_slices: int, num_slices: int, lv_range=None
     return int(lin_idx[i].round())
 
 def center_crop(image_np, label_np, target_size):
-    # 获取左心室质心
+    """
+    基于左心室中心进行裁剪；若裁剪区域越界则先填充，再围绕中心裁剪，
+    确保左心室中心出现在输出的几何中心。
+    Args:
+        image_np: np.ndarray, 原始图像 (H, W)
+        label_np: np.ndarray, 原始标签 (H, W)
+        target_size: int, 裁剪后的正方形尺寸
+    Returns:
+        cropped_image_np, cropped_label_np
+    """
+    # 左心室质心（若不存在返回图像中心）
     center_y, center_x = get_lv_centroid(label_np)
-    
-    h, w = label_np.shape
-    half_size = target_size // 2
-    start_y = max(0, center_y - half_size)
-    end_y   = start_y + target_size
-    start_x = max(0, center_x - half_size)
-    end_x   = start_x + target_size
 
-    
-    # 如果裁剪区域不够大，需要调整
-    if end_y - start_y < target_size:
-        if start_y == 0:
-            end_y = min(h, start_y + target_size)
+    H, W = label_np.shape
+    half = target_size // 2
+
+    # 以质心为几何中心的窗口
+    y0 = center_y - half
+    x0 = center_x - half
+    y1 = y0 + target_size
+    x1 = x0 + target_size
+
+    # 计算需要的四向填充量（不足即为正的 pad）
+    pad_top    = max(0, -y0)
+    pad_left   = max(0, -x0)
+    pad_bottom = max(0,  y1 - H)
+    pad_right  = max(0,  x1 - W)
+
+    if pad_top or pad_left or pad_bottom or pad_right:
+        # 图像优先使用反射填充；反射不可行时降级为边缘复制；再兜底为常数0
+        eff_mode = 'reflect'
+        if (H < 2 or W < 2 or
+            pad_top >= H or pad_bottom >= H or
+            pad_left >= W or pad_right >= W):
+            eff_mode = 'edge'
+
+        if eff_mode == 'reflect':
+            image_np = np.pad(image_np,
+                              ((pad_top, pad_bottom), (pad_left, pad_right)),
+                              mode='reflect')
+        elif eff_mode == 'edge':
+            image_np = np.pad(image_np,
+                              ((pad_top, pad_bottom), (pad_left, pad_right)),
+                              mode='edge')
         else:
-            start_y = max(0, end_y - target_size)
-    
-    if end_x - start_x < target_size:
-        if start_x == 0:
-            end_x = min(w, start_x + target_size)
-        else:
-            start_x = max(0, end_x - target_size)
-    
-    # 裁剪
+            image_np = np.pad(image_np,
+                              ((pad_top, pad_bottom), (pad_left, pad_right)),
+                              mode='constant', constant_values=0)
+
+        # 标签恒为背景常数填充
+        label_np = np.pad(label_np,
+                          ((pad_top, pad_bottom), (pad_left, pad_right)),
+                          mode='constant', constant_values=0)
+
+        # 更新中心坐标到新坐标系
+        center_y += pad_top
+        center_x += pad_left
+        H += pad_top + pad_bottom
+        W += pad_left + pad_right
+
+    # 现在可以安全裁剪，且确保中心在中点
+    start_y = center_y - half
+    start_x = center_x - half
+    end_y = start_y + target_size
+    end_x = start_x + target_size
+
     cropped_image_np = image_np[start_y:end_y, start_x:end_x]
     cropped_label_np = label_np[start_y:end_y, start_x:end_x]
-
-    # 如果裁剪后的尺寸仍然不够，进行填充
-    if cropped_image_np.shape[0] < target_size or cropped_image_np.shape[1] < target_size:
-        pad_h = max(0, target_size - cropped_image_np.shape[0])
-        pad_w = max(0, target_size - cropped_image_np.shape[1])
-
-        cropped_image_np = np.pad(cropped_image_np,
-                                   ((pad_h//2, pad_h - pad_h//2),
-                                    (pad_w//2, pad_w - pad_w//2)),
-                                   mode='constant', constant_values=0)
-        cropped_label_np = np.pad(cropped_label_np,
-                                   ((pad_h//2, pad_h - pad_h//2),
-                                    (pad_w//2, pad_w - pad_w//2)),
-                                   mode='constant', constant_values=0)
 
     return cropped_image_np, cropped_label_np
 
@@ -113,7 +140,7 @@ if __name__ == "__main__":
     np.random.seed(seed)
     config = Config()
 
-    dataset_dir = "D:/Users/pyw/Desktop/Dataset/ACDC_aligned"
+    dataset_dir = "D:/Users/pyw/Desktop/Dataset/ACDC"
     group = ["gp1", "gp2", "gp3", "gp4", "gp5"]
     phase = ["ED", "ES"]
 
@@ -283,21 +310,21 @@ if __name__ == "__main__":
         else:
             ES_counts[i] = 0
 
-    np.save(f"{config.DATASET_DIR}/ACDC_aligned/ED_prior_{int(ed_selected_vols)}samples_4chs.npy", ED_prior)
-    np.save(f"{config.DATASET_DIR}/ACDC_aligned/ES_prior_{int(es_selected_vols)}samples_4chs.npy", ES_prior)
+    np.save(f"{config.DATASET_DIR}/ACDC/ED_prior_{int(ed_selected_vols)}samples_4chs.npy", ED_prior)
+    np.save(f"{config.DATASET_DIR}/ACDC/ES_prior_{int(es_selected_vols)}samples_4chs.npy", ES_prior)
     
     # 保存用到的体积路径到txt文件，ED和ES合并，分别保存image和label路径
     total_samples = int(ed_selected_vols + es_selected_vols)
     
     # 保存image路径
-    with open(f"{config.DATASET_DIR}/ACDC_aligned/used_image_paths_{total_volume}samples.txt", 'w', encoding='utf-8') as f:
+    with open(f"{config.DATASET_DIR}/ACDC/used_image_paths_{total_volume}samples.txt", 'w', encoding='utf-8') as f:
         for vol_info in used_volume_paths['ED']:
             f.write(f"{vol_info['image_path']}\n")
         for vol_info in used_volume_paths['ES']:
             f.write(f"{vol_info['image_path']}\n")
     
     # 保存label路径
-    with open(f"{config.DATASET_DIR}/ACDC_aligned/used_label_paths_{total_volume}samples.txt", 'w', encoding='utf-8') as f:
+    with open(f"{config.DATASET_DIR}/ACDC/used_label_paths_{total_volume}samples.txt", 'w', encoding='utf-8') as f:
         for vol_info in used_volume_paths['ED']:
             f.write(f"{vol_info['label_path']}\n")
         for vol_info in used_volume_paths['ES']:
@@ -311,5 +338,5 @@ if __name__ == "__main__":
     print("ES per-slice counts:", ES_counts.tolist())
     print("Total volumes used (ED,ES):", int(ed_selected_vols), int(es_selected_vols))
     print("Total slices used (ED,ES):", int(ed_selected_vols * prior_slices), int(es_selected_vols * prior_slices))
-    print(f"Image paths saved to: {config.DATASET_DIR}/ACDC_aligned/used_image_paths_{total_volume}samples.txt")
-    print(f"Label paths saved to: {config.DATASET_DIR}/ACDC_aligned/used_label_paths_{total_volume}samples.txt")
+    print(f"Image paths saved to: {config.DATASET_DIR}/ACDC/used_image_paths_{total_volume}samples.txt")
+    print(f"Label paths saved to: {config.DATASET_DIR}/ACDC/used_label_paths_{total_volume}samples.txt")
