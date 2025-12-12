@@ -8,14 +8,17 @@ import random
 @dataclass
 class Config:
     SEED: int = 42
-    # SEED: int = random.randint(0, 2**32 - 1)  # 每次运行时生成一个随机种子
-    DATASET: str = "YORK"  # Options: ACDC, MM, SCD, YORK
+    DATASET: str = "ACDC"  # Options: ACDC, MM, SCD, YORK
     DATASET_DIR: str = "D:/Users/pyw/Desktop/Dataset"
     BATCH_SIZE: int = 16
     EPOCHS: int = 50
     PRIOR_NUM_OF_PATIENT: int = 25
     LEARNING_RATE: float = 5e-4
     NUM_WORKERS: int = 8
+    LOSS1_WEIGHT: float = 1.0
+    LOSS2_WEIGHT: float = 10.0
+    LOSS3_WEIGHT: float = 1.0
+    LOSS3_WEIGHT_END: float = 0.01
     BEST_LOSS: float = float('inf')
     BEST_DICE: float = 0.8
     BEST_IOU: float = 0.8
@@ -40,7 +43,6 @@ class Config:
     PRIOR_SCALE_RANGE: tuple = (0.5, 2.0) if DATASET == "MM" else (0.8, 1.25)
     SHIFT_RANGE: tuple = (0, 0)
     ROTATE_RANGE: tuple = (-60, 60)
-    USE_LABEL_PRIOR: bool = False  # 是否使用标签先验
     METRIC_WITH_BACKGROUND: bool = False  # 评估指标是否包含背景
 
     # 开始配准的epoch
@@ -60,14 +62,7 @@ class Config:
     RESULTS_DIR: str = './results'           # 结果保存目录
 
     MODE: str = 'train'  # train | test 
-
-
-    # 后处理相关
-    ENABLE_POSTPROCESS: bool = False
-    POSTPROCESS_MIN_SIZE: int = 30
-    POSTPROCESS_KERNEL_SIZE: int = 3
-    POSTPROCESS_MAX_DIST_RATIO: float = 0.3  # 相对于图像大小的最大距离比例
-
+    MU_VAR_MODE: str = 'image_global'  # 'pixel' | 'image_global'
 
 
 def get_config():
@@ -81,6 +76,9 @@ def get_config():
     parser.add_argument('--epochs', type=int, default=Config.EPOCHS)
     parser.add_argument('--lr', type=float, default=Config.LEARNING_RATE)
     parser.add_argument('--num_workers', type=int, default=Config.NUM_WORKERS)
+    parser.add_argument('--loss1_weight', type=float, default=Config.LOSS1_WEIGHT)
+    parser.add_argument('--loss2_weight', type=float, default=Config.LOSS2_WEIGHT)
+    parser.add_argument('--loss3_weight', type=float, default=Config.LOSS3_WEIGHT)
     parser.add_argument('--checkpoints_dir', type=str, default=Config.CHECKPOINTS_DIR)
     parser.add_argument('--visualize', type=bool, default=Config.VISUALIZE)
     parser.add_argument('--add_tensorboard', type=bool, default=Config.ADD_TENSORBOARD)
@@ -101,7 +99,6 @@ def get_config():
     parser.add_argument('--rotate_range', type=float, nargs=2, default=Config.ROTATE_RANGE)
     parser.add_argument('--metric_with_background', type=bool, default=Config.METRIC_WITH_BACKGROUND)
     parser.add_argument('--start_reg', type=int, default=Config.START_REG)
-    parser.add_argument('--use_label_prior', type=bool, default=Config.USE_LABEL_PRIOR)
     parser.add_argument('--mu_range', type=float, default=Config.MU_RANGE)
     parser.add_argument('--log_var_min', type=float, default=Config.LOG_VAR_MIN)
     parser.add_argument('--log_var_max', type=float, default=Config.LOG_VAR_MAX)
@@ -110,11 +107,9 @@ def get_config():
     parser.add_argument('--predict_dir', type=str, default=Config.PREDICT_DIR)
     parser.add_argument('--results_dir', type=str, default=Config.RESULTS_DIR)
     parser.add_argument('--mode', type=str, default=Config.MODE)
+    parser.add_argument('--mu_var_mode', type=str, default=Config.MU_VAR_MODE,
+                        choices=['pixel', 'image_global', 'dataset_global'])
 
-    parser.add_argument('--enable_postprocess', type=bool, default=Config.ENABLE_POSTPROCESS)
-    parser.add_argument('--postprocess_min_size', type=int, default=Config.POSTPROCESS_MIN_SIZE)
-    parser.add_argument('--postprocess_kernel_size', type=int, default=Config.POSTPROCESS_KERNEL_SIZE)
-    parser.add_argument('--postprocess_max_dist_ratio', type=float, default=Config.POSTPROCESS_MAX_DIST_RATIO)
 
     args = parser.parse_args()
 
@@ -127,6 +122,9 @@ def get_config():
         EPOCHS=args.epochs,
         LEARNING_RATE=args.lr,
         NUM_WORKERS=args.num_workers,
+        LOSS1_WEIGHT=args.loss1_weight,
+        LOSS2_WEIGHT=args.loss2_weight,
+        LOSS3_WEIGHT=args.loss3_weight,
         CHECKPOINTS_DIR=args.checkpoints_dir,
         OUTPUT_DIR=args.output_dir,
         LOGS_DIR=args.logs_dir,
@@ -146,7 +144,6 @@ def get_config():
         SHIFT_RANGE=tuple(args.shift_range),
         ROTATE_RANGE=tuple(args.rotate_range),
         START_REG=args.start_reg,
-        USE_LABEL_PRIOR=args.use_label_prior,
         METRIC_WITH_BACKGROUND=args.metric_with_background,
         MU_RANGE=args.mu_range,
         LOG_VAR_MIN=args.log_var_min,
@@ -156,10 +153,8 @@ def get_config():
         PREDICT_DIR=args.predict_dir,
         RESULTS_DIR=args.results_dir,
         MODE=args.mode,
-        ENABLE_POSTPROCESS=args.enable_postprocess,
-        POSTPROCESS_MIN_SIZE=args.postprocess_min_size,
-        POSTPROCESS_KERNEL_SIZE=args.postprocess_kernel_size,
-        POSTPROCESS_MAX_DIST_RATIO=args.postprocess_max_dist_ratio,
+        MU_VAR_MODE=args.mu_var_mode,
+        
         # 保留默认值（不可通过命令行修改）
         BEST_LOSS=Config.BEST_LOSS,
         BEST_DICE=Config.BEST_DICE,

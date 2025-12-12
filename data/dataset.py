@@ -6,7 +6,6 @@ import numpy as np
 from PIL import Image
 from config import Config
 from data.transform import center_crop_image_label
-import re
 from typing import List
 
 
@@ -96,15 +95,6 @@ class ACDCDataset(Dataset):
             prior = torch.tensor(prior, dtype=torch.float32)
         prior = torch.clamp(prior, min=1e-6, max=1.0)
 
-
-        # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.config.ACDC_CROP_SIZE, self.config.ACDC_CROP_SIZE), dtype=np.float32)
-        label_np = label.squeeze().detach().cpu().numpy()
-        for k in range(self.gmm_num):
-            label_prior[k] = (label_np == k).astype(np.float32)
-        label_prior = torch.tensor(label_prior, dtype=torch.float32)
-        label_prior = torch.clamp(label_prior, min=1e-6, max=1.0)
-
         return {
             "image": image,
             "label": label,
@@ -113,13 +103,13 @@ class ACDCDataset(Dataset):
             "frame_name": frame_name,
             "class_num": 4,
             "prior": prior,
-            "label_prior": label_prior,
         }
         
 
 #  0.955 to 2.64 mm2/pixel
 class MMDataset(Dataset):
     def __init__(self, phase='train', transform_image=None, transform_label=None, config: Config=Config()):
+        # phase: 'train' | 'val' | 'test'
         self.root_dir = os.path.join(config.DATASET_DIR, "MM")
         self.config = config
         self.img_size = config.IMG_SIZE
@@ -201,15 +191,6 @@ class MMDataset(Dataset):
         else:
             prior = torch.tensor(prior, dtype=torch.float32)
         prior = torch.clamp(prior, min=1e-6, max=1.0)
-
-
-        # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.config.MM_CROP_SIZE, self.config.MM_CROP_SIZE), dtype=np.float32)
-        label_np = label.squeeze().detach().cpu().numpy()
-        for k in range(self.gmm_num):
-            label_prior[k] = (label_np == k).astype(np.float32)
-        label_prior = torch.tensor(label_prior, dtype=torch.float32)
-        label_prior = torch.clamp(label_prior, min=1e-6, max=1.0)
         
         return {
             "image": image,
@@ -219,7 +200,6 @@ class MMDataset(Dataset):
             "frame_name": frame_name,
             "class_num": 4,
             "prior": prior,
-            "label_prior": label_prior
         }
     
 
@@ -307,15 +287,6 @@ class SCDDataset(Dataset):
         else:
             prior = torch.tensor(prior, dtype=torch.float32)
         prior = torch.clamp(prior, min=1e-6, max=1.0)
-
-
-        # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.config.SCD_CROP_SIZE, self.config.SCD_CROP_SIZE), dtype=np.float32)
-        label_np = label.squeeze().detach().cpu().numpy()
-        for k in range(self.gmm_num):
-            label_prior[k] = (label_np == k).astype(np.float32)
-        label_prior = torch.tensor(label_prior, dtype=torch.float32)
-        label_prior = torch.clamp(label_prior, min=1e-6, max=1.0)
         
         return {
             "image": image,
@@ -325,7 +296,6 @@ class SCDDataset(Dataset):
             "frame_name": frame_name,
             "class_num": 2,
             "prior": prior,
-            "label_prior": label_prior
         }
     
 
@@ -407,15 +377,6 @@ class YORKDataset(Dataset):
             prior = torch.tensor(prior, dtype=torch.float32)
         prior = torch.clamp(prior, min=1e-6, max=1.0)
 
-        # 根据label动态生成prior
-        label_prior = np.zeros((self.gmm_num, self.config.YORK_CROP_SIZE, self.config.YORK_CROP_SIZE), dtype=np.float32)
-        label_np = label.squeeze().detach().cpu().numpy()
-        for k in range(self.gmm_num):
-            label_prior[k] = (label_np == k).astype(np.float32)
-        label_prior = torch.tensor(label_prior, dtype=torch.float32)
-        label_prior = torch.clamp(label_prior, min=1e-6, max=1.0)
-
-
         return {
             "image": image,
             "label": label,
@@ -424,7 +385,6 @@ class YORKDataset(Dataset):
             "frame_name": frame_name,
             "class_num": 3,
             "prior": prior,
-            "label_prior": label_prior
         }
 
     

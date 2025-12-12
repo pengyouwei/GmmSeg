@@ -6,22 +6,20 @@ import math
 from config import Config
 
 
+def reconstruction_loss(x, mu, var, r, eps: float = 1e-6):
+    var = var.clamp_min(eps)
 
-def reconstruction_loss(x, mu, var, pi, eps: float = 1e-6):
-    # 均值相关部分：衡量预测均值与真实值的差异
     mu_part = -0.5 * torch.sum((x - mu) ** 2 / var, dim=2)  # [B, K, H, W]
-    
-    # 方差相关部分：归一化常数，衡量方差的影响
     var_part = -0.5 * torch.sum(torch.log(2 * math.pi * var), dim=2)  # [B, K, H, W]
     
     # 完整的高斯对数似然
     log_gauss = mu_part + var_part
 
-    # 用混合权重π加权
-    pi = torch.clamp(pi, min=eps)
-    recon_loss = pi * log_gauss
-    recon_mu_part = pi * mu_part
-    recon_var_part = pi * var_part
+    # 用混合权重r加权
+    r = torch.clamp(r, min=eps)
+    recon_loss = r * log_gauss
+    recon_mu_part = r * mu_part
+    recon_var_part = r * var_part
     
     # 返回总损失和分解部分
     total_recon = -torch.mean(torch.sum(recon_loss, dim=1))
@@ -30,13 +28,13 @@ def reconstruction_loss(x, mu, var, pi, eps: float = 1e-6):
     return total_recon, mu_component, var_component
 
 
-def kl_categorical_loss(pi, alpha, eps: float = 1e-6):
-    pi = torch.clamp(pi, min=eps)
+def kl_categorical_loss(r, alpha, eps: float = 1e-6):
+    r = torch.clamp(r, min=eps)
     alpha = torch.clamp(alpha, min=eps)
-    log_pi = torch.log(pi)
+    log_r = torch.log(r)
     alpha_sum = torch.sum(alpha, dim=1, keepdim=True) # [B, 1, H, W]
     digamma_diff = digamma(alpha) - digamma(alpha_sum)  # E[log w_{ik}]
-    kl = torch.sum(pi * (log_pi - digamma_diff), dim=1)  # [B, H, W]
+    kl = torch.sum(r * (log_r - digamma_diff), dim=1)  # [B, H, W]
     return kl.mean()
 
 
@@ -98,7 +96,9 @@ class GmmLoss(nn.Module):
         self.k = config.GMM_NUM
         self.config = config
 
-    def forward(self, input, mu, var, pi, alpha, prior, epoch, total_epochs):
+    def forward(self, input, mu, var, r, alpha, prior, epoch, total_epochs):
+
+        # r = compute_responsibilities(input, mu, var, alpha)  # [B,K,H,W]
 
         B, C, H, W = input.shape
         x = input.unsqueeze(1)  # [B, 1, C, H, W]
@@ -106,35 +106,34 @@ class GmmLoss(nn.Module):
         # Reshape
         mu  = mu.reshape(B, self.k, C, H, W)
         var = var.reshape(B, self.k, C, H, W)
-        pi  = pi.reshape(B, self.k, H, W)
-        alpha  = alpha.reshape(B, self.k, H, W)
-        prior  = prior.reshape(B, self.k, H, W)
+        r = r.reshape(B, self.k, H, W)
+        alpha = alpha.reshape(B, self.k, H, W)
+        prior = prior.reshape(B, self.k, H, W)
 
         # ----------------------
         # 1 Reconstruction term: -E_q(z|x) [ log N(x|mu,var) ]
-        recon_loss, mu_component, var_component = reconstruction_loss(x, mu, var, pi)
+        recon_loss, mu_component, var_component = reconstruction_loss(x, mu, var, r)
 
         # ----------------------
         # 2 KL(q(z|x) || p(z|Ω))
-        kl_z_loss = kl_categorical_loss(pi, alpha)
+        kl_z_loss = kl_categorical_loss(r, alpha)
         
         # ----------------------
         # 3 KL(Dir(alpha) || Dir(prior)), exact closed form
         kl_o_loss = kl_dirichlet_loss(alpha, prior)
-
-        warm = cosine_warmup(epoch + 1, warmup_epochs=5)
         
-        weight_1 = 1.0
-        weight_2 = 0.1 * warm
-        weight_3 = cosine_decay(epoch + 1, total_epochs, start=0.1, end=0.001)
+        weight_1 = self.config.LOSS1_WEIGHT
+        weight_2 = self.config.LOSS2_WEIGHT
+        weight_3 = cosine_decay(epoch + 1, total_epochs, start=self.config.LOSS3_WEIGHT, end=self.config.LOSS3_WEIGHT_END)
 
         loss_1 = recon_loss * weight_1
         loss_2 = kl_z_loss * weight_2
         loss_3 = kl_o_loss * weight_3
 
         regularization_term = kl_gaussian_loss(mu, var) * 0.001
+        # regularization_term = (mu_component ** 2) * 10
 
-        total_loss = loss_1 + loss_2 + loss_3 + regularization_term
+        total_loss = loss_1 + loss_2 + loss_3 + regularization_term 
 
 
         # 字典返回形式
@@ -143,7 +142,7 @@ class GmmLoss(nn.Module):
             'recon': loss_1,
             'recon_mu': mu_component,
             'recon_var': var_component,
-            'kl_pi': loss_2, 
+            'kl_cat': loss_2, 
             'kl_dir': loss_3,  
             'weight_1': weight_1,
             'weight_2': weight_2,

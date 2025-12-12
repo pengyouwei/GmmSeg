@@ -6,11 +6,10 @@ import torch.nn as nn
 import torch.optim as optim
 import math
 from utils.loss import GmmLoss
-from utils.train_utils import forward_pass, compute_responsibilities
+from utils.train_utils import forward_pass
 from utils.visualizer import create_visualization
 from utils.metrics import evaluate_segmentation
-from utils.dataloader import get_loaders
-from utils.postprocess import comprehensive_postprocess
+from data.dataloader import get_loaders
 from models.unet import UNet
 from models.regnet import RR_ResNet
 from models.align_net import Align_ResNet
@@ -24,6 +23,7 @@ import random
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
+
 def set_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
@@ -32,8 +32,8 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True)
     
 
@@ -86,10 +86,13 @@ class Trainer:
         self.logger.info(f"Valid samples: {len(self.valid_loader.dataset)}")
         self.logger.info(f"Test  samples: {len(self.test_loader.dataset)}")
 
+        # # 全局或者像素级可训练 μ 和 log σ²
+        self.mu_var_mode = getattr(self.config, "MU_VAR_MODE", "pixel")
+
         # 定义模型
         self.unet = UNet(self.config.IN_CHANNELS, self.config.FEATURE_NUM).to(self.config.DEVICE)  # UNet 用于提取特征
         self.x_net = UNet(self.config.FEATURE_NUM, self.config.FEATURE_NUM * self.config.GMM_NUM * 2).to(self.config.DEVICE)  # mu, var
-        self.z_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # pi
+        self.z_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # r
         self.o_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # d
         self.reg_net = RR_ResNet(input_channels=2).to(self.config.DEVICE)
         self.align_net = Align_ResNet(input_channels=1).to(self.config.DEVICE)
@@ -144,7 +147,6 @@ class Trainer:
                 param.requires_grad = False
             for param in self.scale_net.parameters():
                 param.requires_grad = False
-            
 
         except Exception as e:
             self.logger.error(f"加载预训练权重时出错: {e}")
@@ -158,6 +160,7 @@ class Trainer:
             {'params': self.z_net.parameters(), 'lr': self.config.LEARNING_RATE, 'weight_decay': 1e-5},
             {'params': self.o_net.parameters(), 'lr': self.config.LEARNING_RATE, 'weight_decay': 1e-5},
         ]
+
         self.optimizer = optim.Adam(opt_params, eps=1e-8, betas=(0.9, 0.999))
 
         # 改进的学习率调度器
@@ -197,10 +200,6 @@ class Trainer:
             image = batch["image"].to(device=self.config.DEVICE, dtype=torch.float32)
             label = batch["label"].to(device=self.config.DEVICE, dtype=torch.float32)
             prior = batch["prior"].to(device=self.config.DEVICE, dtype=torch.float32)
-            label_prior = batch["label_prior"].to(device=self.config.DEVICE, dtype=torch.float32)
-
-            if self.config.USE_LABEL_PRIOR:
-                prior = label_prior  # 直接使用标签先验进行训练
 
             # 梯度清零
             self.optimizer.zero_grad()
@@ -224,16 +223,23 @@ class Trainer:
             feature_4chs = forward_pass_result["feature_4chs"]
             mu = forward_pass_result["mu"]
             var = forward_pass_result["var"]
-            pi = forward_pass_result["pi"]
+            r = forward_pass_result["r"]
             d1 = forward_pass_result["d1"]
             d0 = forward_pass_result["d0"]
 
+            if self.mu_var_mode == "image_global":
+                # 对每张图做空间平均，得到 [B,K,C,1,1] 并广播回像素
+                mu_glb = mu.mean(dim=(-1, -2), keepdim=True)
+                var_glb = var.mean(dim=(-1, -2), keepdim=True)
+                mu = mu_glb.expand_as(mu)
+                var = var_glb.clamp_min(1e-6).expand_as(var)
+            
             # 计算损失 (添加异常处理)
             try:
                 loss_out = self.criterion(input=feature_4chs,
                                           mu=mu,
                                           var=var,
-                                          pi=pi,
+                                          r=r,
                                           alpha=d1,
                                           prior=d0,
                                           epoch=epoch,
@@ -242,13 +248,9 @@ class Trainer:
                 loss_1 = loss_out['recon']
                 mu_component = loss_out['recon_mu']
                 var_component = loss_out['recon_var']
-                loss_2 = loss_out['kl_pi']
+                loss_2 = loss_out['kl_cat']
                 loss_3 = loss_out['kl_dir']
 
-                if not torch.isfinite(loss):
-                    if self.logger:
-                        self.logger.warning(f"训练中检测到无效损失值: {loss.item()}, 跳过此batch")
-                    continue
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"计算损失时发生错误: {e}")
@@ -298,10 +300,6 @@ class Trainer:
                 image = batch['image'].to(self.config.DEVICE, dtype=torch.float32)
                 label = batch['label'].to(self.config.DEVICE, dtype=torch.float32)
                 prior = batch['prior'].to(self.config.DEVICE, dtype=torch.float32)
-                label_prior = batch['label_prior'].to(self.config.DEVICE, dtype=torch.float32)
-
-                if self.config.USE_LABEL_PRIOR:
-                    prior = label_prior  # 直接使用标签先验进行验证
 
                 ds = batch["ds"][0]  # 当前批次数据集标识
                 # 前向传播
@@ -320,11 +318,9 @@ class Trainer:
                                                    epoch=epoch, 
                                                    epsilon=epsilon)
                 feature_4chs = forward_pass_result["feature_4chs"]
-                scaled_image = forward_pass_result["scaled_image"]
-                scaled_label = forward_pass_result["scaled_label"]
                 mu = forward_pass_result["mu"]
                 var = forward_pass_result["var"]
-                pi = forward_pass_result["pi"]
+                r = forward_pass_result["r"]
                 d1 = forward_pass_result["d1"]
                 d0 = forward_pass_result["d0"]
                 image_scale = forward_pass_result["image_scale"]
@@ -333,13 +329,19 @@ class Trainer:
                 prior_ty = forward_pass_result["prior_ty"]
                 angle = forward_pass_result["angle"]
 
+                # —— 覆盖 μ/σ² —— 
+                if self.mu_var_mode == "image_global":
+                    mu_glb = mu.mean(dim=(-1, -2), keepdim=True)
+                    var_glb = var.mean(dim=(-1, -2), keepdim=True)
+                    mu = mu_glb.expand_as(mu)
+                    var = var_glb.clamp_min(1e-6).expand_as(var)
 
                 # 计算损失 (添加异常处理)
                 try:
                     loss_out = self.criterion(input=feature_4chs,
                                               mu=mu,
                                               var=var,
-                                              pi=pi,
+                                              r=r,
                                               alpha=d1,
                                               prior=d0,
                                               epoch=epoch,
@@ -348,16 +350,12 @@ class Trainer:
                     loss_1 = loss_out['recon']
                     mu_component = loss_out['recon_mu']
                     var_component = loss_out['recon_var']
-                    loss_2 = loss_out['kl_pi']
+                    loss_2 = loss_out['kl_cat']
                     loss_3 = loss_out['kl_dir']
                     self.current_weight_1 = loss_out['weight_1']
                     self.current_weight_2 = loss_out['weight_2']
                     self.current_weight_3 = loss_out['weight_3']
 
-                    if not torch.isfinite(loss):
-                        if self.logger:
-                            self.logger.warning(f"验证中检测到无效损失值: {loss.item()}, 跳过此batch")
-                        continue
                 except Exception as e:
                     if self.logger:
                         self.logger.error(f"验证计算损失时发生错误: {e}")
@@ -370,10 +368,7 @@ class Trainer:
                 valid_loss_mu += mu_component.item()
                 valid_loss_var += var_component.item()
                 valid_loss += loss.item()
-
                 # 计算评价指标
-                # pred_cls = torch.argmax(pi, dim=1).detach().cpu().numpy()
-                r = compute_responsibilities(feature_4chs, mu, var, alpha=d1)
                 pred_cls = torch.argmax(r, dim=1).detach().cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
 
@@ -408,7 +403,7 @@ class Trainer:
 
         # 随机可视化最后一个batch中的一个样本
         i = random.randint(0, image.shape[0]-1)
-        self.pi_show = pi.detach().cpu().numpy()[i]
+        self.r_show = r.detach().cpu().numpy()[i]
         self.d1_show = d1.detach().cpu().numpy()[i]
         self.d0_show = d0.detach().cpu().numpy()[i]
         self.image_show = image[i].squeeze().detach().cpu().numpy()
@@ -463,6 +458,7 @@ class Trainer:
         self.unet.load_state_dict(unet_weights)
         self.align_net.load_state_dict(align_net_weights)
         self.scale_net.load_state_dict(scale_net_weights)
+        
         self.x_net.eval()
         self.z_net.eval()
         self.o_net.eval()
@@ -493,19 +489,20 @@ class Trainer:
                                                    config=self.config, 
                                                    epoch=None,
                                                    epsilon=1e-6)
-                feature_4chs = forward_pass_result["feature_4chs"]
-                scaled_label = forward_pass_result["scaled_label"]
                 mu = forward_pass_result["mu"]
                 var = forward_pass_result["var"]
-                pi = forward_pass_result["pi"]
-                alpha = forward_pass_result["d1"]
+                r = forward_pass_result["r"]
+
+                # —— 覆盖 μ/σ² —— 
+                if self.mu_var_mode == "image_global":
+                    mu_glb = mu.mean(dim=(-1, -2), keepdim=True)
+                    var_glb = var.mean(dim=(-1, -2), keepdim=True)
+                    mu = mu_glb.expand_as(mu)
+                    var = var_glb.clamp_min(1e-6).expand_as(var)
                 
-                # pred_cls = torch.argmax(pi, dim=1).detach().cpu().numpy()
-                r = compute_responsibilities(x=feature_4chs, mu=mu, var=var, alpha=alpha)
                 pred_cls = torch.argmax(r, dim=1).detach().cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
 
-                ds = batch["ds"][0]  # 当前批次数据集标识
                 class_num = batch["class_num"][0]  # 当前批次数据集类别数
                 # 与验证一致的类别后处理：
                 if ds == "SCD":
@@ -515,10 +512,11 @@ class Trainer:
                     pred_cls[pred_cls == 3] = 0
 
                 # 评估指标：不计背景
-                test_dice += evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND)["Dice"]["mean"]
-                test_dice_lv += evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND)["Dice"]["per_class"].get(1, 0.0)
-                test_dice_myo += evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND)["Dice"]["per_class"].get(2, 0.0)
-                test_dice_rv += evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND)["Dice"]["per_class"].get(3, 0.0)
+                metrics = evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND)
+                test_dice += metrics["Dice"]["mean"]
+                test_dice_lv += metrics["Dice"]["per_class"].get(1, 0.0)
+                test_dice_myo += metrics["Dice"]["per_class"].get(2, 0.0)
+                test_dice_rv += metrics["Dice"]["per_class"].get(3, 0.0)
 
         test_dice /= len(self.test_loader)
         test_dice_lv /= len(self.test_loader)
@@ -589,7 +587,7 @@ class Trainer:
         create_visualization(
             image_show=getattr(self, 'image_show', None),
             label_show=getattr(self, 'label_show', None),
-            pi_show=getattr(self, 'pi_show', None),
+            r_show=getattr(self, 'r_show', None),
             d1_show=getattr(self, 'd1_show', None),
             d0_show=getattr(self, 'd0_show', None),
             pred_show=getattr(self, 'pred_show', None),

@@ -126,14 +126,14 @@ class ConditionalResize(transforms.Resize):
 
 def get_image_transform(img_size):
     return transforms.Compose([
-        # ConditionalResize((img_size, img_size), img_size, interpolation=InterpolationMode.BILINEAR),  
+        ConditionalResize((img_size, img_size), img_size, interpolation=InterpolationMode.BILINEAR),  
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5])
     ])
 
 def get_label_transform(img_size):
     return transforms.Compose([
-        # ConditionalResize((img_size, img_size), img_size, interpolation=InterpolationMode.NEAREST),  
+        ConditionalResize((img_size, img_size), img_size, interpolation=InterpolationMode.NEAREST),  
         transforms.PILToTensor()
     ])
 

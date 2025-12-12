@@ -3,38 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from config import Config
 from data.transform import apply_affine_transform, apply_rotate_transform
-from utils.postprocess import comprehensive_postprocess
 import numpy as np
 import cv2
-
 import math
 from torch.special import digamma
-
-def compute_responsibilities(x, mu, var, alpha, eps=1e-6):
-    B, C, H, W = x.shape
-    K = mu.shape[1] // C  # GMM分量数
-    x = x.unsqueeze(1)  # [B, 1, C, H, W]
-
-    # Reshape
-    mu  = mu.reshape(B, K, C, H, W)
-    var = var.reshape(B, K, C, H, W)
-    alpha  = alpha.reshape(B, K, H, W)
-
-    # x: [B,1,C,H,W], mu/var: [B,K,C,H,W], alpha: [B,K,H,W]
-    var = var.clamp_min(eps)
-
-    # log N(x|mu,var)，对通道求和 -> [B,K,H,W]
-    log_gauss = -0.5 * torch.sum((x - mu) ** 2 / var, dim=2) \
-                -0.5 * torch.sum(torch.log(2.0 * math.pi * var), dim=2)
-
-    # 先验的 E[log w_k] -> [B,K,H,W]
-    alpha_sum = torch.sum(alpha, dim=1, keepdim=True).clamp_min(eps)
-    log_prior = digamma(alpha) - digamma(alpha_sum)
-
-    # 后验 log r_k ∝ log_prior + log_likelihood
-    log_r = log_prior + log_gauss
-    r = torch.softmax(log_r, dim=1)  # [B,K,H,W]
-    return r  # 概率分割，argmax 即分割标签
 
 
 def standardize_features(features, config: Config = None, eps: float = 1e-6):
@@ -75,14 +47,14 @@ def process_gmm_parameters(output_x, output_z, output_o, config: Config, epsilon
     var = torch.exp(log_var)
 
     # ---- π ----
-    pi = torch.softmax(output_z, dim=1)
-    pi = pi + epsilon
-    pi = pi / pi.sum(dim=1, keepdim=True)
+    r = torch.softmax(output_z, dim=1)
+    r = r + epsilon
+    r = r / r.sum(dim=1, keepdim=True)
 
     # ---- α 浓度参数 ----
     alpha = F.softplus(output_o) + epsilon  # 保证 alpha > 0
 
-    return mu, var, pi, alpha
+    return mu, var, r, alpha
 
 
 def compute_dirichlet_priors(alpha, prior, reg_net, config: Config, epoch):
@@ -195,15 +167,15 @@ def forward_pass(image, label,
 
     # GMM网络前向传播
     output_x = x_net(feature_4chs)  # mu, var
-    output_z = z_net(feature_4chs)  # pi
+    output_z = z_net(feature_4chs)  # r
     output_o = o_net(feature_4chs)  # d
 
     # 处理GMM参数
-    mu, var, pi, alpha = process_gmm_parameters(output_x=output_x, 
-                                                output_z=output_z, 
-                                                output_o=output_o, 
-                                                config=config, 
-                                                epsilon=epsilon)
+    mu, var, r, alpha = process_gmm_parameters(output_x=output_x, 
+                                               output_z=output_z, 
+                                               output_o=output_o, 
+                                               config=config, 
+                                               epsilon=epsilon)
     
     d1 = alpha
     d0, prior_scale, prior_tx, prior_ty = None, None, None, None
@@ -227,7 +199,7 @@ def forward_pass(image, label,
         "label": label,
         "mu": mu,
         "var": var,
-        "pi": pi,
+        "r": r,
         "d1": d1,
         "d0": d0,
         "image_scale": image_scale,

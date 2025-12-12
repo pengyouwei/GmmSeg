@@ -32,7 +32,7 @@ class Predictor:
 		self.transform_image = get_image_transform(config.IMG_SIZE)
 		self.unet = UNet(config.IN_CHANNELS, config.FEATURE_NUM).to(self.device)
 		self.x_net = UNet(self.config.FEATURE_NUM, self.config.FEATURE_NUM * self.config.GMM_NUM * 2).to(self.config.DEVICE)  # mu, var
-		self.z_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # pi
+		self.z_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # r
 		self.o_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # d
 		self.load_weights()
 		self.unet.eval()

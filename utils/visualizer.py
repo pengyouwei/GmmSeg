@@ -6,7 +6,7 @@ from config import Config
 
 def create_visualization(image_show,        # [H, W]
                          label_show,        # [H, W]
-                         pi_show,           # [K, H, W]
+                         r_show,            # [K, H, W]
                          d1_show,           # [K, H, W]
                          d0_show,           # [K, H, W]
                          pred_show,         # [H, W]
@@ -36,12 +36,12 @@ def create_visualization(image_show,        # [H, W]
     axes[3, 0].axis('off')
 
     for i in range(1, 5):
-        axes[0, i].imshow(pi_show[i-1], cmap='gray')
+        axes[0, i].imshow(r_show[i-1], cmap='gray')
         axes[1, i].imshow(d0_show[i-1], cmap='gray')
         axes[2, i].imshow(d1_show[i-1], cmap='gray')
         axes[3, i].imshow(d1_show[i-1], cmap='gray')
         axes[3, i].imshow(d0_show[i-1], cmap='jet', alpha=0.4)
-        axes[0, i].set_title(f"pi[{i-1}]")
+        axes[0, i].set_title(f"r[{i-1}]")
         axes[1, i].set_title(f"d0[{i-1}]")
         axes[2, i].set_title(f"d1[{i-1}]")
         axes[3, i].set_title(f"d1-d0[{i-1}]")
