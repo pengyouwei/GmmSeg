@@ -1,16 +1,18 @@
 import os
 import logging
 import time
+import csv
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import math
 from utils.loss import GmmLoss
-from utils.train_utils import forward_pass
+from utils.train_utils import forward_pass, gmm_posterior
 from utils.visualizer import create_visualization
 from utils.metrics import evaluate_segmentation
 from data.dataloader import get_loaders
-from models.unet import UNet
+from models.unet import UNet, FeatureExtractor
+from models.transformer import TransformerNet
 from models.regnet import RR_ResNet
 from models.align_net import Align_ResNet
 from models.scale_net import Scale_ResNet
@@ -22,6 +24,7 @@ import matplotlib.pyplot as plt
 import random
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
+from collections import defaultdict
 
 
 def set_seed(seed: int = 42):
@@ -40,6 +43,8 @@ def set_seed(seed: int = 42):
 class Trainer:
     def __init__(self, config: Config):
         self.config = config
+        self.logs_dir = None
+        self.history = None
 
     def get_logger(self, train: bool = True):
         logger = logging.getLogger("trainer")
@@ -59,6 +64,7 @@ class Trainer:
         else:
             logs_dir = os.path.join(self.config.LOGS_DIR, "test_logs", self.config.DATASET)
         os.makedirs(logs_dir, exist_ok=True)
+        self.logs_dir = logs_dir
 
         time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         log_path = os.path.join(logs_dir, f"{time_str}.log")
@@ -77,9 +83,133 @@ class Trainer:
         return logger, console_handler, file_handler, time_str
 
 
+    def _init_history(self):
+        self.history = {
+            "epoch": [],
+            "lr": [],
+            "train_total": [],
+            "train_loss1": [],
+            "train_loss2": [],
+            "train_loss3": [],
+            "valid_total": [],
+            "valid_loss1": [],
+            "valid_loss2": [],
+            "valid_loss3": [],
+            "valid_dice": [],
+        }
+
+
+    def _record_history(self, epoch: int):
+        if self.history is None:
+            self._init_history()
+
+        lr0 = None
+        try:
+            if hasattr(self, "optimizer") and len(self.optimizer.param_groups) > 0:
+                lr0 = float(self.optimizer.param_groups[0]["lr"])
+        except Exception:
+            lr0 = None
+
+        self.history["epoch"].append(int(epoch) + 1)
+        self.history["lr"].append(lr0)
+        self.history["train_total"].append(float(getattr(self, "avg_train_loss", float('nan'))))
+        self.history["train_loss1"].append(float(getattr(self, "train_loss_1", float('nan'))))
+        self.history["train_loss2"].append(float(getattr(self, "train_loss_2", float('nan'))))
+        self.history["train_loss3"].append(float(getattr(self, "train_loss_3", float('nan'))))
+        self.history["valid_total"].append(float(getattr(self, "avg_valid_loss", float('nan'))))
+        self.history["valid_loss1"].append(float(getattr(self, "valid_loss_1", float('nan'))))
+        self.history["valid_loss2"].append(float(getattr(self, "valid_loss_2", float('nan'))))
+        self.history["valid_loss3"].append(float(getattr(self, "valid_loss_3", float('nan'))))
+        self.history["valid_dice"].append(float(getattr(self, "avg_dice", float('nan'))))
+
+
+    def _save_history_csv(self):
+        if not self.logs_dir or not self.history or len(self.history.get("epoch", [])) == 0:
+            return None
+
+        path = os.path.join(self.logs_dir, f"history_{self.time_str}.csv")
+        fields = [
+            "epoch",
+            "lr",
+            "train_total",
+            "train_loss1",
+            "train_loss2",
+            "train_loss3",
+            "valid_total",
+            "valid_loss1",
+            "valid_loss2",
+            "valid_loss3",
+            "valid_dice",
+        ]
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(fields)
+            n = len(self.history["epoch"])
+            for i in range(n):
+                w.writerow([self.history[k][i] for k in fields])
+        return path
+
+
+    def _plot_training_curves(self):
+        if not self.logs_dir or not self.history or len(self.history.get("epoch", [])) == 0:
+            return None
+
+        epochs = self.history["epoch"]
+
+        out_paths: list[str] = []
+
+        # 1) total loss (train only) -> single figure
+        fig1 = plt.figure(figsize=(8, 5))
+        ax1 = fig1.add_subplot(1, 1, 1)
+        ax1.plot(epochs, self.history["train_total"], label="Train total", linewidth=2)
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Loss")
+        ax1.set_title("Train Total Loss")
+        ax1.legend()
+        fig1.tight_layout()
+        p1 = os.path.join(self.logs_dir, f"train_total_loss_{self.time_str}.png")
+        fig1.savefig(p1, dpi=200)
+        plt.close(fig1)
+        out_paths.append(p1)
+
+        # 2) loss components (train only) -> single figure
+        fig2 = plt.figure(figsize=(8, 5))
+        ax2 = fig2.add_subplot(1, 1, 1)
+        ax2.plot(epochs, self.history["train_loss1"], label="Loss1", linewidth=2)
+        ax2.plot(epochs, self.history["train_loss2"], label="Loss2", linewidth=2)
+        ax2.plot(epochs, self.history["train_loss3"], label="Loss3", linewidth=2)
+        ax2.set_xlabel("Epoch")
+        ax2.set_ylabel("Loss")
+        ax2.set_title("Train Loss Components")
+        ax2.legend(ncol=3)
+        fig2.tight_layout()
+        p2 = os.path.join(self.logs_dir, f"train_loss_components_{self.time_str}.png")
+        fig2.savefig(p2, dpi=200)
+        plt.close(fig2)
+        out_paths.append(p2)
+
+        # 3) dice curve -> single figure
+        fig3 = plt.figure(figsize=(8, 5))
+        ax3 = fig3.add_subplot(1, 1, 1)
+        ax3.plot(epochs, self.history["valid_dice"], label="Valid Dice", linewidth=2)
+        ax3.set_xlabel("Epoch")
+        ax3.set_ylabel("Dice")
+        ax3.set_title("Dice Curve")
+        ax3.legend()
+        fig3.tight_layout()
+        p3 = os.path.join(self.logs_dir, f"dice_curve_{self.time_str}.png")
+        fig3.savefig(p3, dpi=200)
+        plt.close(fig3)
+        out_paths.append(p3)
+
+        return out_paths
+
+
     def setup(self, train=True):
         set_seed(self.config.SEED)
         self.logger, self.console_handler, self.file_handler, self.time_str = self.get_logger(train=train)
+        if train:
+            self._init_history()
         # 加载数据集
         self.train_loader, self.valid_loader, self.test_loader = get_loaders(self.config)
         self.logger.info(f"Train samples: {len(self.train_loader.dataset)}")
@@ -90,10 +220,15 @@ class Trainer:
         self.mu_var_mode = getattr(self.config, "MU_VAR_MODE", "pixel")
 
         # 定义模型
-        self.unet = UNet(self.config.IN_CHANNELS, self.config.FEATURE_NUM).to(self.config.DEVICE)  # UNet 用于提取特征
+        self.unet = FeatureExtractor(self.config.IN_CHANNELS, 4).to(self.config.DEVICE)  # UNet 用于提取特征
         self.x_net = UNet(self.config.FEATURE_NUM, self.config.FEATURE_NUM * self.config.GMM_NUM * 2).to(self.config.DEVICE)  # mu, var
         self.z_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # r
         self.o_net = UNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # d
+
+        # self.x_net = TransformerNet(self.config.FEATURE_NUM, self.config.FEATURE_NUM * self.config.GMM_NUM * 2).to(self.config.DEVICE)  # mu, var
+        # self.z_net = TransformerNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # r
+        # self.o_net = TransformerNet(self.config.FEATURE_NUM, self.config.GMM_NUM).to(self.config.DEVICE)  # d
+
         self.reg_net = RR_ResNet(input_channels=2).to(self.config.DEVICE)
         self.align_net = Align_ResNet(input_channels=1).to(self.config.DEVICE)
         self.scale_net = Scale_ResNet(input_channels=2).to(self.config.DEVICE)
@@ -147,6 +282,8 @@ class Trainer:
                 param.requires_grad = False
             for param in self.scale_net.parameters():
                 param.requires_grad = False
+            # for param in self.o_net.parameters():
+            #     param.requires_grad = False
 
         except Exception as e:
             self.logger.error(f"加载预训练权重时出错: {e}")
@@ -189,6 +326,8 @@ class Trainer:
         self.x_net.train()
         self.z_net.train()
         self.o_net.train()
+        # self.o_net.eval()
+
 
         train_loss = 0.0
         train_loss_1, train_loss_2, train_loss_3 = 0.0, 0.0, 0.0
@@ -323,7 +462,6 @@ class Trainer:
                 r = forward_pass_result["r"]
                 d1 = forward_pass_result["d1"]
                 d0 = forward_pass_result["d0"]
-                image_scale = forward_pass_result["image_scale"]
                 prior_scale = forward_pass_result["prior_scale"]
                 prior_tx = forward_pass_result["prior_tx"]
                 prior_ty = forward_pass_result["prior_ty"]
@@ -369,6 +507,9 @@ class Trainer:
                 valid_loss_var += var_component.item()
                 valid_loss += loss.item()
                 # 计算评价指标
+                pi = d1 / (d1.sum(dim=1, keepdim=True) + epsilon)
+                posterior = gmm_posterior(feature_4chs, mu, var, pi)
+
                 pred_cls = torch.argmax(r, dim=1).detach().cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
 
@@ -383,8 +524,14 @@ class Trainer:
                     # YORK: 网络输出有4通道，但标注通常仅含0/1/2，将预测的3类归为背景
                     pred_cls[pred_cls == 3] = 0
 
+                # 临时交换 LV 和 MYO 的标签
+                # lv = pred_cls == 1
+                # myo = pred_cls == 2
+                # pred_cls[lv] = 2
+                # pred_cls[myo] = 1
+
                 # 指标与测试保持一致：不计入背景（更符合常见分割评估）
-                results = evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND)
+                results = evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND, test=False)
                 dice_total += results["Dice"]["mean"]
                 dice_lv_total += results["Dice"]["per_class"].get(1, 0.0)
                 dice_myo_total += results["Dice"]["per_class"].get(2, 0.0)
@@ -402,7 +549,8 @@ class Trainer:
         self.avg_dice_rv = dice_rv_total / len(self.valid_loader)
 
         # 随机可视化最后一个batch中的一个样本
-        i = random.randint(0, image.shape[0]-1)
+        # i = random.randint(0, image.shape[0]-1)
+        i = 0  # 固定第一个样本，便于观察训练过程
         self.r_show = r.detach().cpu().numpy()[i]
         self.d1_show = d1.detach().cpu().numpy()[i]
         self.d0_show = d0.detach().cpu().numpy()[i]
@@ -410,7 +558,6 @@ class Trainer:
         self.label_show = label_np[i]
         self.pred_show = pred_cls[i]
         # 记录配准参数
-        self.image_scale = image_scale[i].item() if image_scale is not None else 0
         self.prior_scale = prior_scale[i].item()
         self.prior_tx = prior_tx[i].item()
         self.prior_ty = prior_ty[i].item()
@@ -466,7 +613,9 @@ class Trainer:
         self.align_net.eval()
         self.scale_net.eval()
 
-        test_dice, test_dice_lv, test_dice_myo, test_dice_rv = 0, 0, 0, 0
+        test_dice, test_jaccard, test_hd95, test_asd = 0, 0, 0, 0
+        dice_per_class_sum = defaultdict(float)
+        dice_per_class_cnt = defaultdict(int)
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc=f"[test]", ncols=100):
                 image = batch['image'].to(self.config.DEVICE, dtype=torch.float32)
@@ -489,9 +638,12 @@ class Trainer:
                                                    config=self.config, 
                                                    epoch=None,
                                                    epsilon=1e-6)
+                feature_4chs = forward_pass_result["feature_4chs"]
                 mu = forward_pass_result["mu"]
                 var = forward_pass_result["var"]
+                d1 = forward_pass_result["d1"]
                 r = forward_pass_result["r"]
+                # r = feature_4chs
 
                 # —— 覆盖 μ/σ² —— 
                 if self.mu_var_mode == "image_global":
@@ -500,6 +652,9 @@ class Trainer:
                     mu = mu_glb.expand_as(mu)
                     var = var_glb.clamp_min(1e-6).expand_as(var)
                 
+                pi = d1 / (d1.sum(dim=1, keepdim=True) + 1e-6)
+                posterior = gmm_posterior(feature_4chs, mu, var, pi)
+
                 pred_cls = torch.argmax(r, dim=1).detach().cpu().numpy()
                 label_np = torch.squeeze(label, dim=1).detach().cpu().numpy()
 
@@ -511,21 +666,51 @@ class Trainer:
                 if ds == "YORK":
                     pred_cls[pred_cls == 3] = 0
 
+                # 交换 LV 和 MYO 的标签
+                # lv = pred_cls == 1
+                # myo = pred_cls == 2
+                # pred_cls[lv] = 2
+                # pred_cls[myo] = 1
+
                 # 评估指标：不计背景
-                metrics = evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND)
+                metrics = evaluate_segmentation(pred_cls, label_np, class_num, background=self.config.METRIC_WITH_BACKGROUND, test=True)
                 test_dice += metrics["Dice"]["mean"]
-                test_dice_lv += metrics["Dice"]["per_class"].get(1, 0.0)
-                test_dice_myo += metrics["Dice"]["per_class"].get(2, 0.0)
-                test_dice_rv += metrics["Dice"]["per_class"].get(3, 0.0)
+                test_jaccard += metrics["Jaccard"]["mean"]
+                test_hd95 += metrics["HD95"]["mean"]
+                test_asd += metrics["ASD"]["mean"]
+
+                # 逐类 Dice（跨测试集平均）
+                per_class = (metrics.get("Dice") or {}).get("per_class") or {}
+                for cls, v in per_class.items():
+                    try:
+                        fv = float(v)
+                    except Exception:
+                        continue
+                    if np.isfinite(fv):
+                        dice_per_class_sum[int(cls)] += fv
+                        dice_per_class_cnt[int(cls)] += 1
 
         test_dice /= len(self.test_loader)
-        test_dice_lv /= len(self.test_loader)
-        test_dice_myo /= len(self.test_loader)
-        test_dice_rv /= len(self.test_loader)
+        test_jaccard /= len(self.test_loader)
+        test_hd95 /= len(self.test_loader)
+        test_asd /= len(self.test_loader)
         self.logger.info(f"[Test] Dice: {test_dice:.4f}")
-        self.logger.info(f"[Test] Dice LV: {test_dice_lv:.4f}")
-        self.logger.info(f"[Test] Dice MYO: {test_dice_myo:.4f}")
-        self.logger.info(f"[Test] Dice RV: {test_dice_rv:.4f}")
+
+        # 打印每类 Dice（按有效 batch 计数求平均）
+        if len(dice_per_class_cnt) > 0:
+            cls_keys = sorted(dice_per_class_cnt.keys())
+            parts = []
+            for cls in cls_keys:
+                cnt = dice_per_class_cnt[cls]
+                if cnt <= 0:
+                    continue
+                parts.append(f"c{cls}:{(dice_per_class_sum[cls] / cnt):.4f}")
+            if parts:
+                self.logger.info("[Test] Dice per class: " + ", ".join(parts))
+
+        self.logger.info(f"[Test] Jaccard: {test_jaccard:.4f}")
+        self.logger.info(f"[Test] HD95: {test_hd95:.4f}")
+        self.logger.info(f"[Test] ASD: {test_asd:.4f}")
 
 
     def print_log_info(self, epoch):
@@ -556,7 +741,6 @@ class Trainer:
             # 日志展示：角度以“度”为单位（内部计算均为弧度）
             angle_str = "N/A" if not hasattr(self, "angle_deg") or self.angle_deg is None else f"{self.angle_deg:.2f} deg"
             self.logger.info(
-                f"image_scale: {self.image_scale:.2f}  "
                 f"image_rotate: {angle_str}  "
                 f"prior_scale: {self.prior_scale:.2f}  "
                 f"prior_tx: {self.prior_tx:.2f}  "
@@ -658,6 +842,20 @@ class Trainer:
                     self.visualize(epoch)
                 if self.config.ADD_TENSORBOARD:
                     self.add_tensorboard_scalars(epoch)
+                # 记录每个 epoch 的 loss / dice
+                self._record_history(epoch)
+
+            # 训练结束：保存数据并绘制曲线（放在 test 之前，避免 test 异常导致无法保存）
+            csv_path = self._save_history_csv()
+            fig_paths = self._plot_training_curves()
+            if self.logger:
+                if csv_path:
+                    self.logger.info(f"Saved training history: {csv_path}")
+                if fig_paths:
+                    if isinstance(fig_paths, (list, tuple)):
+                        self.logger.info("Saved training curves: " + ", ".join(fig_paths))
+                    else:
+                        self.logger.info(f"Saved training curves: {fig_paths}")
         self.test()
         self.cleanup(train=train)
 

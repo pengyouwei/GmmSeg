@@ -89,12 +89,14 @@ def get_loaders(config: Config):
                               worker_init_fn=seed_worker,
                               generator=g,
                               pin_memory=True, 
+                              persistent_workers=True,
                               drop_last=True)
     valid_loader = DataLoader(valid_set, 
                               batch_size=config.BATCH_SIZE, 
                               shuffle=False,
                               num_workers=config.NUM_WORKERS, 
                               pin_memory=True, 
+                              persistent_workers=True,
                               drop_last=False)
     test_loader = DataLoader(test_set, 
                              batch_size=config.BATCH_SIZE, 

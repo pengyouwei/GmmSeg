@@ -6,6 +6,30 @@ import math
 from config import Config
 
 
+def gmm_posterior(x, mu, var, pi, eps: float = 1e-6):
+    var = var.clamp_min(eps)
+
+    mu_part = -0.5 * torch.sum((x - mu) ** 2 / var, dim=2)  # [B, K, H, W]
+    var_part = -0.5 * torch.sum(torch.log(2 * math.pi * var), dim=2)  # [B, K, H, W]
+    
+    # 完整的高斯对数似然
+    log_gauss = mu_part + var_part
+
+    # 用混合权重 pi 加权（先归一化到概率单纯形上）
+    pi = torch.clamp(pi, min=eps)
+    pi = pi / pi.sum(dim=1, keepdim=True)
+    log_pi = torch.log(pi)
+    logits = log_pi + log_gauss  # [B, K, H, W]
+
+    # posterior = softmax(logits)
+    log_norm = torch.logsumexp(logits, dim=1, keepdim=True)  # [B,1,H,W]
+    posterior = torch.exp(logits - log_norm)
+    posterior = posterior.clamp_min(eps)
+    posterior = posterior / posterior.sum(dim=1, keepdim=True)
+
+    return posterior
+
+
 def reconstruction_loss(x, mu, var, r, eps: float = 1e-6):
     var = var.clamp_min(eps)
 
@@ -97,9 +121,6 @@ class GmmLoss(nn.Module):
         self.config = config
 
     def forward(self, input, mu, var, r, alpha, prior, epoch, total_epochs):
-
-        # r = compute_responsibilities(input, mu, var, alpha)  # [B,K,H,W]
-
         B, C, H, W = input.shape
         x = input.unsqueeze(1)  # [B, 1, C, H, W]
 
@@ -110,6 +131,10 @@ class GmmLoss(nn.Module):
         alpha = alpha.reshape(B, self.k, H, W)
         prior = prior.reshape(B, self.k, H, W)
 
+        # E[w] under Dirichlet(alpha) as mixture weights
+        pi = alpha / alpha.sum(dim=1, keepdim=True)
+        posterior = gmm_posterior(x, mu, var, pi)
+
         # ----------------------
         # 1 Reconstruction term: -E_q(z|x) [ log N(x|mu,var) ]
         recon_loss, mu_component, var_component = reconstruction_loss(x, mu, var, r)
@@ -117,6 +142,7 @@ class GmmLoss(nn.Module):
         # ----------------------
         # 2 KL(q(z|x) || p(z|Ω))
         kl_z_loss = kl_categorical_loss(r, alpha)
+        # kl_z_loss = (r - posterior).pow(2).mean()
         
         # ----------------------
         # 3 KL(Dir(alpha) || Dir(prior)), exact closed form
@@ -131,9 +157,9 @@ class GmmLoss(nn.Module):
         loss_3 = kl_o_loss * weight_3
 
         regularization_term = kl_gaussian_loss(mu, var) * 0.001
-        # regularization_term = (mu_component ** 2) * 10
+        # regularization_term = kl_gaussian_loss(mu, var) * 0.0
 
-        total_loss = loss_1 + loss_2 + loss_3 + regularization_term 
+        total_loss = loss_1 + loss_2 + loss_3 + regularization_term
 
 
         # 字典返回形式

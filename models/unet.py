@@ -102,6 +102,7 @@ class UNetDecoder(nn.Module):
         self.up2 = UpSampling(512, 256, kernel_size, padding)
         self.up3 = UpSampling(256, 128, kernel_size, padding)
         self.up4 = UpSampling(128, 64, kernel_size, padding)
+        # self.feat = nn.Conv2d(64, 16, kernel_size=1)
         self.out_conv = OutConv(64, out_channels)
 
     def forward(self, encoder_outputs):
@@ -110,8 +111,9 @@ class UNetDecoder(nn.Module):
         x7 = self.up2(x6, x3)
         x8 = self.up3(x7, x2)
         x9 = self.up4(x8, x1)
-        output = self.out_conv(x9)
-        return [x6, x7, x8, x9, output]
+        # feat = self.feat(x9)
+        out = self.out_conv(x9)
+        return [x6, x7, x8, x9, out]
 
 
 
@@ -120,6 +122,19 @@ class UNet(nn.Module):
     
     def __init__(self, in_channels, out_channels):
         super(UNet, self).__init__()
+        self.encoder = UNetEncoder(in_channels)
+        self.decoder = UNetDecoder(out_channels)
+
+    def forward(self, x):
+        encoder_outputs = self.encoder(x)
+        output = self.decoder(encoder_outputs)
+        return output[-1]
+    
+class FeatureExtractor(nn.Module):
+    '''U-Net'''
+    
+    def __init__(self, in_channels, out_channels):
+        super(FeatureExtractor, self).__init__()
         self.encoder = UNetEncoder(in_channels)
         self.decoder = UNetDecoder(out_channels)
 

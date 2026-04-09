@@ -53,6 +53,7 @@ def process_gmm_parameters(output_x, output_z, output_o, config: Config, epsilon
 
     # ---- α 浓度参数 ----
     alpha = F.softplus(output_o) + epsilon  # 保证 alpha > 0
+    # alpha = epsilon + (config.PRIOR_INTENSITY - epsilon) * torch.sigmoid(output_o) 
 
     return mu, var, r, alpha
 
@@ -81,43 +82,6 @@ def compute_dirichlet_priors(alpha, prior, reg_net, config: Config, epoch):
     return affined_prior, scale_pred, tx_pred, ty_pred
 
 
-
-def zoom_around_center(
-    tensor: torch.Tensor,         # [B,C,H,W]
-    scale: torch.Tensor,          # [B]
-    out_size: int,
-    is_label: bool = False,
-    padding_mode: str = 'reflection'
-):
-    """
-    基于图像几何中心的“中心裁剪×scale，再resize回 out_size”。
-    不依赖标签，适用于左心室已在图像中心的情况。
-    """
-    B, C, H, W = tensor.shape
-    device = tensor.device
-    dtype = tensor.dtype
-
-    ys = torch.linspace(-1.0, 1.0, out_size, device=device, dtype=dtype)
-    xs = torch.linspace(-1.0, 1.0, out_size, device=device, dtype=dtype)
-    yy, xx = torch.meshgrid(ys, xs, indexing='ij')
-    base_grid = torch.stack([xx, yy], dim=-1).unsqueeze(0).repeat(B, 1, 1, 1)  # [B,out,out,2]
-
-    # 中心即 (0,0) 的归一化坐标，不需要偏移
-    s = scale.view(B, 1, 1, 1).clamp_min(1e-6)
-    alpha_x = (float(out_size) / max(W, 1)) * s
-    alpha_y = (float(out_size) / max(H, 1)) * s
-    alpha_xy = torch.stack([alpha_x.squeeze(-1), alpha_y.squeeze(-1)], dim=-1)
-
-    src_grid = base_grid * alpha_xy
-    mode = 'bilinear'
-    if is_label: mode = 'nearest'
-    out = F.grid_sample(tensor, src_grid, mode=mode, padding_mode=padding_mode, align_corners=True)
-    if is_label:
-        out = out.long()
-    return out
-
-
-
 def forward_pass(image, label, 
                  prior, 
                  unet, x_net, z_net, o_net, reg_net, align_net, scale_net,
@@ -142,33 +106,15 @@ def forward_pass(image, label,
     # 特征提取和标准化
     with torch.no_grad():
         feature_4chs = unet(image)  # 提取特征
-        feature_4chs = standardize_features(features=feature_4chs)  # 标准化特征
-
-    scaled_image, scaled_label, image_scale = None, None, None
-    if config.DO_IMAGE_SCALE:
-        feature_lv_myo = feature_4chs[:, 1:3, ...]
-        scale_output = scale_net(feature_lv_myo)
-        image_scale = torch.clamp(scale_output[:, 0], config.IMAGE_SCALE_RANGE[0], config.IMAGE_SCALE_RANGE[1])
-
-        # 按“裁剪尺寸 = IMG_SIZE * scale → resize 回 IMG_SIZE”的语义进行缩放（围绕 LV 质心）
-        scaled_image = zoom_around_center(
-            tensor=image, scale=image_scale, out_size=config.IMG_SIZE,
-            is_label=False, padding_mode='reflection'
-        )
-        scaled_label = zoom_around_center(
-            tensor=label.float(), scale=image_scale, out_size=config.IMG_SIZE,
-            is_label=True, padding_mode='zeros'
-        )
-
-        if ds in {"MM", "SCD"}:
-            feature_4chs = unet(scaled_image)  # 提取特征（保留计算图，允许梯度回传到 scale）
-            feature_4chs = standardize_features(features=feature_4chs)  # 标准化特征
-
+        # output_o = feature_4chs.clone()
+    
+    feature_4chs = standardize_features(features=feature_4chs)  # 标准化特征
 
     # GMM网络前向传播
     output_x = x_net(feature_4chs)  # mu, var
     output_z = z_net(feature_4chs)  # r
     output_o = o_net(feature_4chs)  # d
+    # with torch.no_grad():
 
     # 处理GMM参数
     mu, var, r, alpha = process_gmm_parameters(output_x=output_x, 
@@ -188,13 +134,12 @@ def forward_pass(image, label,
                                                                                   epoch=epoch)
         prior_mapped = config.PRIOR_INTENSITY * affined_prior   # 先验浓度参数
         d0 = prior_mapped       # 先验浓度参数
+    # d0 = prior * config.PRIOR_INTENSITY  # 如果不配准
 
 
 
     return {
         "feature_4chs": feature_4chs,
-        "scaled_image": scaled_image,
-        "scaled_label": scaled_label,
         "image": image,
         "label": label,
         "mu": mu,
@@ -202,9 +147,40 @@ def forward_pass(image, label,
         "r": r,
         "d1": d1,
         "d0": d0,
-        "image_scale": image_scale,
         "prior_scale": prior_scale,
         "prior_tx": prior_tx,
         "prior_ty": prior_ty,
         "angle": angle,
     }
+
+
+def gmm_posterior(x, mu, var, pi, eps: float = 1e-6):
+    B, C, H, W = x.shape
+    x = x.unsqueeze(1)  # [B, 1, C, H, W]
+
+    # Reshape
+    mu  = mu.reshape(B, 4, C, H, W)
+    var = var.reshape(B, 4, C, H, W)
+
+
+    var = var.clamp_min(eps)
+
+    mu_part = -0.5 * torch.sum((x - mu) ** 2 / var, dim=2)  # [B, K, H, W]
+    var_part = -0.5 * torch.sum(torch.log(2 * math.pi * var), dim=2)  # [B, K, H, W]
+    
+    # 完整的高斯对数似然
+    log_gauss = mu_part + var_part
+
+    # 用混合权重 pi 加权（先归一化到概率单纯形上）
+    pi = torch.clamp(pi, min=eps)
+    pi = pi / pi.sum(dim=1, keepdim=True)
+    log_pi = torch.log(pi)
+    logits = log_pi + log_gauss  # [B, K, H, W]
+
+    # posterior = softmax(logits)
+    log_norm = torch.logsumexp(logits, dim=1, keepdim=True)  # [B,1,H,W]
+    posterior = torch.exp(logits - log_norm)
+    posterior = posterior.clamp_min(eps)
+    posterior = posterior / posterior.sum(dim=1, keepdim=True)
+
+    return posterior

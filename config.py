@@ -5,6 +5,17 @@ from dataclasses import asdict
 from pprint import pprint
 import random
 
+
+def _str2bool(v):
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in {'true', '1', 'yes', 'y', 't'}:
+        return True
+    if s in {'false', '0', 'no', 'n', 'f'}:
+        return False
+    raise argparse.ArgumentTypeError(f'Invalid boolean value: {v}')
+
 @dataclass
 class Config:
     SEED: int = 42
@@ -14,14 +25,14 @@ class Config:
     EPOCHS: int = 50
     PRIOR_NUM_OF_PATIENT: int = 25
     LEARNING_RATE: float = 5e-4
-    NUM_WORKERS: int = 8
+    NUM_WORKERS: int = 6
     LOSS1_WEIGHT: float = 1.0
     LOSS2_WEIGHT: float = 10.0
     LOSS3_WEIGHT: float = 1.0
-    LOSS3_WEIGHT_END: float = 0.01
+    LOSS3_WEIGHT_END: float = 0.001
     BEST_LOSS: float = float('inf')
-    BEST_DICE: float = 0.8
-    BEST_IOU: float = 0.8
+    BEST_DICE: float = 0.5
+    BEST_IOU: float = 0.5
     BEST_PIXEL_ERROR: float = float('inf')
     BEST_EPOCH: int = -1
     DEVICE: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -38,7 +49,6 @@ class Config:
     IN_CHANNELS: int = 1
     FEATURE_NUM: int = 4
     GMM_NUM: int = 4
-    DO_IMAGE_SCALE: bool = False  # 是否进行图像缩放
     IMAGE_SCALE_RANGE: tuple = (0.5, 2.0)
     PRIOR_SCALE_RANGE: tuple = (0.5, 2.0) if DATASET == "MM" else (0.8, 1.25)
     SHIFT_RANGE: tuple = (0, 0)
@@ -63,6 +73,27 @@ class Config:
 
     MODE: str = 'train'  # train | test 
     MU_VAR_MODE: str = 'image_global'  # 'pixel' | 'image_global'
+
+    # shape-VAE 预训练配置（独立脚本使用，默认不影响原 train.py）
+    SHAPE_NUM_CLASSES: int = 4
+    SHAPE_BG_INDEX: int = 0
+    SHAPE_LATENT_DIM: int = 16
+    SHAPE_BASE_CHANNELS: int = 16
+    SHAPE_BATCH_SIZE: int = 16
+    SHAPE_EPOCHS: int = 50
+    SHAPE_LR: float = 1e-3
+    SHAPE_WEIGHT_DECAY: float = 1e-5
+    SHAPE_RECON_TYPE: str = 'smooth_l1'  # smooth_l1 | l1 | mse
+    SHAPE_KL_BETA: float = 0.01
+    SHAPE_KL_WARMUP_EPOCHS: int = 10
+    SHAPE_MAX_PCA_SAMPLES: int = 0  # 0 表示使用全部样本
+    SHAPE_RECOMPUTE_PCA: bool = False
+    SHAPE_PCA_PATH: str = './checkpoints/shape_vae/ACDC/pca_prior.npz'
+    SHAPE_SAVE_DIR: str = './checkpoints/shape_vae'
+    SHAPE_LOG_DIR: str = './logs/shape_vae'
+    SHAPE_ADD_TENSORBOARD: bool = False
+    SHAPE_CKPT_BEST: str = 'shape_vae_best.pth'
+    SHAPE_CKPT_LAST: str = 'shape_vae_last.pth'
 
 
 def get_config():
@@ -92,7 +123,6 @@ def get_config():
     parser.add_argument('--feature_num', type=int, default=Config.FEATURE_NUM)
     parser.add_argument('--in_channels', type=int, default=Config.IN_CHANNELS)
     parser.add_argument('--gmm_num', type=int, default=Config.GMM_NUM)
-    parser.add_argument('--do_image_scale', type=bool, default=Config.DO_IMAGE_SCALE)
     parser.add_argument('--image_scale_range', type=float, nargs=2, default=Config.IMAGE_SCALE_RANGE)
     parser.add_argument('--prior_scale_range', type=float, nargs=2, default=Config.PRIOR_SCALE_RANGE)
     parser.add_argument('--shift_range', type=float, nargs=2, default=Config.SHIFT_RANGE)
@@ -109,6 +139,27 @@ def get_config():
     parser.add_argument('--mode', type=str, default=Config.MODE)
     parser.add_argument('--mu_var_mode', type=str, default=Config.MU_VAR_MODE,
                         choices=['pixel', 'image_global', 'dataset_global'])
+
+    parser.add_argument('--shape_num_classes', type=int, default=Config.SHAPE_NUM_CLASSES)
+    parser.add_argument('--shape_bg_index', type=int, default=Config.SHAPE_BG_INDEX)
+    parser.add_argument('--shape_latent_dim', type=int, default=Config.SHAPE_LATENT_DIM)
+    parser.add_argument('--shape_base_channels', type=int, default=Config.SHAPE_BASE_CHANNELS)
+    parser.add_argument('--shape_batch_size', type=int, default=Config.SHAPE_BATCH_SIZE)
+    parser.add_argument('--shape_epochs', type=int, default=Config.SHAPE_EPOCHS)
+    parser.add_argument('--shape_lr', type=float, default=Config.SHAPE_LR)
+    parser.add_argument('--shape_weight_decay', type=float, default=Config.SHAPE_WEIGHT_DECAY)
+    parser.add_argument('--shape_recon_type', type=str, default=Config.SHAPE_RECON_TYPE,
+                        choices=['smooth_l1', 'l1', 'mse'])
+    parser.add_argument('--shape_kl_beta', type=float, default=Config.SHAPE_KL_BETA)
+    parser.add_argument('--shape_kl_warmup_epochs', type=int, default=Config.SHAPE_KL_WARMUP_EPOCHS)
+    parser.add_argument('--shape_max_pca_samples', type=int, default=Config.SHAPE_MAX_PCA_SAMPLES)
+    parser.add_argument('--shape_recompute_pca', type=_str2bool, default=Config.SHAPE_RECOMPUTE_PCA)
+    parser.add_argument('--shape_pca_path', type=str, default=Config.SHAPE_PCA_PATH)
+    parser.add_argument('--shape_save_dir', type=str, default=Config.SHAPE_SAVE_DIR)
+    parser.add_argument('--shape_log_dir', type=str, default=Config.SHAPE_LOG_DIR)
+    parser.add_argument('--shape_add_tensorboard', type=_str2bool, default=Config.SHAPE_ADD_TENSORBOARD)
+    parser.add_argument('--shape_ckpt_best', type=str, default=Config.SHAPE_CKPT_BEST)
+    parser.add_argument('--shape_ckpt_last', type=str, default=Config.SHAPE_CKPT_LAST)
 
 
     args = parser.parse_args()
@@ -138,7 +189,6 @@ def get_config():
         FEATURE_NUM=args.feature_num,
         IN_CHANNELS=args.in_channels,
         GMM_NUM=args.gmm_num,
-        DO_IMAGE_SCALE=args.do_image_scale,
         IMAGE_SCALE_RANGE=tuple(args.image_scale_range),
         PRIOR_SCALE_RANGE=tuple(args.prior_scale_range),
         SHIFT_RANGE=tuple(args.shift_range),
@@ -154,6 +204,26 @@ def get_config():
         RESULTS_DIR=args.results_dir,
         MODE=args.mode,
         MU_VAR_MODE=args.mu_var_mode,
+
+        SHAPE_NUM_CLASSES=args.shape_num_classes,
+        SHAPE_BG_INDEX=args.shape_bg_index,
+        SHAPE_LATENT_DIM=args.shape_latent_dim,
+        SHAPE_BASE_CHANNELS=args.shape_base_channels,
+        SHAPE_BATCH_SIZE=args.shape_batch_size,
+        SHAPE_EPOCHS=args.shape_epochs,
+        SHAPE_LR=args.shape_lr,
+        SHAPE_WEIGHT_DECAY=args.shape_weight_decay,
+        SHAPE_RECON_TYPE=args.shape_recon_type,
+        SHAPE_KL_BETA=args.shape_kl_beta,
+        SHAPE_KL_WARMUP_EPOCHS=args.shape_kl_warmup_epochs,
+        SHAPE_MAX_PCA_SAMPLES=args.shape_max_pca_samples,
+        SHAPE_RECOMPUTE_PCA=args.shape_recompute_pca,
+        SHAPE_PCA_PATH=args.shape_pca_path,
+        SHAPE_SAVE_DIR=args.shape_save_dir,
+        SHAPE_LOG_DIR=args.shape_log_dir,
+        SHAPE_ADD_TENSORBOARD=args.shape_add_tensorboard,
+        SHAPE_CKPT_BEST=args.shape_ckpt_best,
+        SHAPE_CKPT_LAST=args.shape_ckpt_last,
         
         # 保留默认值（不可通过命令行修改）
         BEST_LOSS=Config.BEST_LOSS,

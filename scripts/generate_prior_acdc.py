@@ -146,7 +146,7 @@ if __name__ == "__main__":
 
     # Total number of volumes to sample per phase across all groups (proportional by group size)
     # 若为 None 或 <=0 或 >= 可用总量，则使用全部
-    total_volume = 25
+    total_volume = 5
 
     # Image size
     imgsz = config.ACDC_CROP_SIZE # 128

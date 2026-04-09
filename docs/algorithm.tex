@@ -1,0 +1,138 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+
+\begin{document}
+
+% Standalone compilation entry.
+% If you want to include this file in another TeX file, you can either:
+% (1) copy the algorithm environments only, or
+% (2) split the preamble into the main paper and keep only algorithms here.
+
+\begin{algorithm}[t]
+\caption{Constructing the Dirichlet Anatomical Prior (Atlas)}
+\label{alg:dirichlet-prior}
+\KwIn{Auxiliary labeled dataset $\mathcal{D}_s=\{(I^n,Y^n)\}$, number of classes $K$, prior strength $\lambda>0$.}
+\KwOut{Empirical atlas $\tilde{p}\in[0,1]^{K\times H\times W}$ and Dirichlet concentration prior $d^{(0)}=\lambda\,\tilde{p}$.}
+Register all label maps $Y^n$ into a common reference space\;
+\ForEach{pixel position $i\in\{1,\dots,HW\}$}{
+	\For{$k\leftarrow 1$ \KwTo $K$}{
+		$\tilde{p}_{ik}\leftarrow \frac{1}{|\mathcal{D}_s|}\sum_{n} \mathbb{I}(Y^n_i=k)$\;
+	}
+}
+Apply mild smoothing/clipping to $\tilde{p}$ to avoid values too close to 0 or 1\;
+$d^{(0)}\leftarrow \lambda\,\tilde{p}$\;
+\Return{$\ d^{(0)}$}\;
+\end{algorithm}
+
+
+\begin{algorithm}[t]
+\caption{Training of VGM-Seg (Prior-Guided Variational GMM)}
+\label{alg:vgmseg-train}
+\KwIn{Unlabeled target images $\mathcal{D}_t=\{I\}$, atlas prior $\tilde{p}$, number of components/classes $K$, epochs $E$.\\
+Frozen networks: feature extractor $f_{\mathrm{enc}}$, registration $f_{\mathrm{reg}}$, rotation aligner $f_{\mathrm{align}}$ (only for SCD/YORK).\\
+Trainable networks: $f_X$ (Gaussian parameters), $f_Z$ (categorical posterior), $f_O$ (Dirichlet concentration parameter).}
+\KwOut{Trained parameters of $f_X,f_Z,f_O$.}
+Initialize parameters of $f_X,f_Z,f_O$ (pretrained)\;
+Freeze $f_{\mathrm{enc}}$, $f_{\mathrm{reg}}$, and $f_{\mathrm{align}}$\;
+\For{$e\leftarrow 1$ \KwTo $E$}{
+	\ForEach{mini-batch image $I$ (with dataset tag $ds$)}{
+		\If{$ds\in\{\mathrm{SCD},\mathrm{YORK}\}$}{
+			$\vartheta\leftarrow f_{\mathrm{align}}(I)$\;
+			$I\leftarrow \mathcal{R}_{-\vartheta}(I)$ \tcp*{rotate to standard orientation, aligned with atlas}
+		}
+		$\mathbf{X}\leftarrow \mathrm{Std}\bigl(f_{\mathrm{enc}}(I)\bigr)$ \tcp*{pixel-wise feature map}
+
+		$(\boldsymbol{\mu},\boldsymbol{\sigma}^2)\leftarrow f_X(\mathbf{X})$\;
+		$r\leftarrow \mathrm{Softmax}\bigl(f_Z(\mathbf{X})\bigr)$ \tcp*{$q(Z\mid X)$}
+		$\hat d\leftarrow \mathrm{Softplus}\bigl(f_O(\mathbf{X})\bigr)$ \tcp*{$q(\Omega\mid X)$}
+
+		$\bar d\leftarrow \mathrm{Normalize}(\hat d)$ \tcp*{channel-wise normalization to $[0,1]$}
+		$\phi\leftarrow f_{\mathrm{reg}}\bigl(\mathrm{concat}(\tilde{p}_{\mathrm{LV}},\ \bar d_{\mathrm{LV}})\bigr)$\;
+		$d\leftarrow \lambda\,\mathcal{T}_{\phi}(\tilde{p})$ \tcp*{aligned Dirichlet prior}
+
+		$\pi\leftarrow \hat d/\sum_{k} \hat d_k$ \tcp*{$\mathbb{E}_{q}[\omega]$}
+
+			cp{Negative ELBO: $\mathcal{L}=\lambda_1\mathcal{L}_1+\lambda_2\mathcal{L}_2+\lambda_3(e)\mathcal{L}_3+\mathcal{R}$}
+		$\mathcal{L}_1\leftarrow -\sum_{i}\sum_{k} r_{ik}\,\log\mathcal{N}(\mathbf{x}_i\mid \boldsymbol{\mu}_{ik},\ \mathrm{diag}(\boldsymbol{\sigma}^2_{ik}))$\;
+		$\mathcal{L}_2\leftarrow \sum_{i}\sum_{k} r_{ik}\Bigl[\log r_{ik}-\bigl(\psi(\hat d_{ik})-\psi(\sum_{k'}\hat d_{ik'})\bigr)\Bigr]$\;
+		$\mathcal{L}_3\leftarrow \sum_{i} \mathrm{KL}\bigl(\mathrm{Dir}(\hat d_i)\,\Vert\,\mathrm{Dir}(d_i)\bigr)$\;
+		$\mathcal{L}\leftarrow \lambda_1\mathcal{L}_1+\lambda_2\mathcal{L}_2+\lambda_3(e)\mathcal{L}_3+\mathcal{R}$\;
+
+		Update parameters of $f_X,f_Z,f_O$ by minimizing $\mathcal{L}$\;
+	}
+}
+\Return{trained $f_X,f_Z,f_O$}\;
+\end{algorithm}
+
+
+\begin{algorithm}[t]
+\caption{Inference of VGM-Seg (Pixel-wise Unsupervised Segmentation)}
+\label{alg:vgmseg-infer}
+\KwIn{Test image $I$ (with dataset tag $ds$), atlas prior $\tilde{p}$, trained networks $f_{\mathrm{enc}},f_X,f_Z,f_O$, frozen $f_{\mathrm{reg}},f_{\mathrm{align}}$.}
+\KwOut{Segmentation mask $\hat{Y}\in\{0,\dots,K-1\}^{H\times W}$.}
+\If{$ds\in\{\mathrm{SCD},\mathrm{YORK}\}$}{
+	$\vartheta\leftarrow f_{\mathrm{align}}(I)$\;
+	$I\leftarrow \mathcal{R}_{-\vartheta}(I)$\;
+}
+$\mathbf{X}\leftarrow \mathrm{Std}\bigl(f_{\mathrm{enc}}(I)\bigr)$\;
+$(\boldsymbol{\mu},\boldsymbol{\sigma}^2)\leftarrow f_X(\mathbf{X})$\;
+$r\leftarrow \mathrm{Softmax}\bigl(f_Z(\mathbf{X})\bigr)$\;
+\ForEach{pixel $i$}{
+	$\hat{y}_i\leftarrow \arg\max_{k} r_{ik}$\;
+}
+	cp{reshape $\{\hat{y}_i\}$ back to an $H\times W$ mask}
+\Return{$\hat{Y}$}\;
+\end{algorithm}
+
+\end{document}
+
+
+
+
+% \documentclass[runningheads]{llncs}
+
+% \usepackage[T1]{fontenc}
+% \usepackage{graphicx}
+% \usepackage{bm}
+% \usepackage{hyperref}
+% \usepackage{amsmath}
+% \usepackage{amssymb}
+% \usepackage{mathtools}
+% \usepackage[ruled, linesnumbered]{algorithm2e}
+% \SetKwInOut{Input}{Input}
+% \SetKwInOut{Return}{Return}
+
+% \DeclareMathOperator*{\argmax}{arg\,max}
+% \DeclareMathOperator*{\argmin}{arg\,min}
+% \newcommand{\R}{\mathbb{R}}
+% \newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+
+% \begin{document}
+
+% \begin{algorithm}[t]
+% \caption{EM Algorithm for GMM}\label{alg:EM-GMM}
+% \KwIn{Image $\boldsymbol{I}$ and set of classes $K$}
+% \BlankLine
+% Initialize parameters $(\boldsymbol{\pi}, \boldsymbol{\mu}, \boldsymbol{\Sigma}) \in \R^{|K|} \times \R^{|K| \times m} \times \R^{|K| \times m \times m}$\;
+% \Repeat{convergence}
+%         {\textbf{E-step:} For all $x \in \Omega$ and all $k \in K$ set
+%         \begin{align*}
+%             w_{xk} \leftarrow \frac{\pi_k  g(\boldsymbol{I}(x) |\mu_k , \Sigma_k ) }
+%                                 {\sum_{k' \in K} \pi_{k'}  g\left(\boldsymbol{I}(x) |\mu_{k'} , \Sigma_{k'} \right)}
+%         \end{align*}
+        
+%         \noindent \textbf{M-step:} For all $k \in K$ set
+%         \begin{align*}
+%         \pi_k &\leftarrow \frac{1}{|\Omega|} \sum_{x \in \Omega} w_{xk}  \\
+%         \mu_k &\leftarrow \frac{\sum_{x \in \Omega} w_{xk}  \boldsymbol{I}(x)}{\sum_{x \in \Omega} w_{xk} } \\
+%         \Sigma_k &\leftarrow \frac{\sum_{x \in \Omega} w_{xk}  (\boldsymbol{I}(x)-\mu_k ) (\boldsymbol{I}(x)-\mu_k )^T}{\sum_{x \in \Omega} w_{xk} }
+%         \end{align*}
+%         }
+%     \Return{$\boldsymbol{\pi} , \boldsymbol{\mu} , \boldsymbol{\Sigma}$}
+% \end{algorithm}
+
+% \end{document}

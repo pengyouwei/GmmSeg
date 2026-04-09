@@ -1,0 +1,2 @@
+idx,ds,frame_name,slice_id,C,H,W,file,n_class0,n_class1,n_class2,n_class3
+1,ACDC,ED,1,4,128,128,ACDC/00001_ACDC_ED_slice1.npz,12221,1482,869,1812

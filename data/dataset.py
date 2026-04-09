@@ -9,6 +9,68 @@ from data.transform import center_crop_image_label
 from typing import List
 
 
+class ACDCPriorDataset(Dataset):
+    def __init__(self, phase='train', transform_image=None, transform_label=None, config: Config=Config()):
+        self.root_dir = os.path.join(config.DATASET_DIR, "ACDC")
+        self.config = config
+        self.img_size = config.IMG_SIZE
+        self.gmm_num = config.GMM_NUM
+        self.transform_image = transform_image
+        self.transform_label = transform_label
+        self.images = []
+        self.labels = []
+        self.phase = phase
+        self.prior_num_of_patient = config.PRIOR_NUM_OF_PATIENT
+
+        image_volume_path = os.path.join(self.root_dir, f"used_image_paths_{config.PRIOR_NUM_OF_PATIENT}samples.txt")
+        label_volume_path = os.path.join(self.root_dir, f"used_label_paths_{config.PRIOR_NUM_OF_PATIENT}samples.txt")
+        with open(image_volume_path, 'r') as f:
+            image_volume_list = f.readlines()
+        with open(label_volume_path, 'r') as f:
+            label_volume_list = f.readlines()
+
+        if self.phase == 'train':
+            image_volume_list = image_volume_list[:int(0.8*len(image_volume_list))]
+            label_volume_list = label_volume_list[:int(0.8*len(label_volume_list))]
+        else:
+            image_volume_list = image_volume_list[int(0.8*len(image_volume_list)):]
+            label_volume_list = label_volume_list[int(0.8*len(label_volume_list)):]
+
+        for img_vol_path, lbl_vol_path in zip(image_volume_list, label_volume_list):
+            img_vol = np.load(img_vol_path.strip()) # (num_slices, H, W)
+            lbl_vol = np.load(lbl_vol_path.strip()) # (num_slices, H, W)
+            num_slices = img_vol.shape[0]
+            # 根据phase选择切片
+            for slice_id in range(num_slices):
+                self.images.append(img_vol[slice_id])
+                self.labels.append(lbl_vol[slice_id])
+
+        assert len(self.images) == len(self.labels), "Number of images and labels do not match"
+
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        label = self.labels[idx]
+        image = Image.fromarray((image * 255).astype(np.uint8))
+        label = Image.fromarray(label.astype(np.uint8))
+
+        # 使用基于左心室中心的裁剪策略
+        image, label = center_crop_image_label(image, label, self.config.IMG_SIZE)
+        
+        if self.transform_image:
+            image = self.transform_image(image) # [C, H, W]
+        if self.transform_label:
+            label = self.transform_label(label) # [C, H, W]
+
+        return {
+            "image": image,
+            "label": label,
+        }
+
+
 # 定义数据集ACDCDataset
 # The spatial resolution goes from 1.37 to 1.68 mm2/pixel
 class ACDCDataset(Dataset):
@@ -329,7 +391,7 @@ class YORKDataset(Dataset):
                         "slice_id": slice_id,
                         "prior_path": prior_path,
                         "frame_name": frame_name,
-                })
+                    })
 
         self.patients.sort(key=lambda x: x['path'])
 
